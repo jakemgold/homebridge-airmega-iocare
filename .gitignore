@@ -1,5 +1,7 @@
-# Ignore compiled code
-dist
+# Compiled output: NOT ignored. See note on the `prepare` script removal —
+# we ship dist/ in the repo so `npm install -g <git-url>` on a Pi doesn't
+# need to invoke tsc at install time, which is unreliable across npm
+# versions. Run `npm run build` before committing src/ changes.
 
 # ------------- Defaults ------------- #
 .DS_Store
@@ -87,7 +89,6 @@ web_modules/
 
 # Nuxt.js build / generate output
 .nuxt
-dist
 
 # Gatsby files
 .cache/
