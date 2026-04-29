@@ -202,10 +202,19 @@ class AirPurifierAccessory {
      * Without ConfiguredName, every sub-tile in iOS 16+ falls back to the
      * accessory's own name — which is why all five Airmega sub-tiles previously
      * read "Airmega 400S" instead of "Sleep" / "Eco" / "Display Light" / etc.
+     *
+     * `addOptionalCharacteristic` is needed because HAP-NodeJS's metadata for
+     * AirPurifier / AirQualitySensor / FilterMaintenance / Switch doesn't list
+     * ConfiguredName as a recognized optional characteristic, so writing it via
+     * setCharacteristic alone produces a "Characteristic not in required or
+     * optional characteristic section" warning per service. Registering it on
+     * the optional list first silences the warning and matches the documented
+     * pattern for adding non-canonical characteristics.
      */
     setServiceName(svc, name) {
         const C = this.platform.Characteristic;
         svc.setCharacteristic(C.Name, name);
+        svc.addOptionalCharacteristic(C.ConfiguredName);
         svc.setCharacteristic(C.ConfiguredName, name);
     }
     fanSpeedToHomeKit(s) {
