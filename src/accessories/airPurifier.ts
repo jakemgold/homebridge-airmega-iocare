@@ -50,7 +50,7 @@ export class AirPurifierAccessory {
       .setCharacteristic(C.SerialNumber, this.device.serial ?? this.device.deviceId);
 
     this.purifier = accessory.getService(S.AirPurifier) ?? accessory.addService(S.AirPurifier);
-    this.purifier.setCharacteristic(C.Name, this.device.name);
+    this.setServiceName(this.purifier, this.device.name);
     // Mark the AirPurifier as the primary service so Apple Home shows the
     // purifier tile, with the preset switches and air-quality sensor surfacing
     // as sub-tiles.
@@ -74,19 +74,21 @@ export class AirPurifierAccessory {
 
     this.airQuality = accessory.getService(S.AirQualitySensor)
       ?? accessory.addService(S.AirQualitySensor);
-    this.airQuality.setCharacteristic(C.Name, 'Air Quality');
+    this.setServiceName(this.airQuality, 'Air Quality');
     this.airQuality.getCharacteristic(C.AirQuality)
       .onGet(() => this.state?.airQuality ?? 0);
 
     this.preFilter = accessory.getServiceById(S.FilterMaintenance, 'pre')
       ?? accessory.addService(S.FilterMaintenance, 'Pre-filter', 'pre');
+    this.setServiceName(this.preFilter, 'Pre-filter');
     this.max2Filter = accessory.getServiceById(S.FilterMaintenance, 'max2')
       ?? accessory.addService(S.FilterMaintenance, 'Max2 Filter', 'max2');
+    this.setServiceName(this.max2Filter, 'Max2 Filter');
 
     for (const preset of PRESETS) {
       const svc = accessory.getServiceById(S.Switch, preset.subtype)
         ?? accessory.addService(S.Switch, preset.display, preset.subtype);
-      svc.setCharacteristic(C.Name, preset.display);
+      this.setServiceName(svc, preset.display);
       svc.getCharacteristic(C.On)
         .onGet(() => this.state?.mode === preset.apiMode)
         .onSet(v => this.handlePresetSet(preset, v));
@@ -97,7 +99,7 @@ export class AirPurifierAccessory {
     if (exposeLight) {
       this.lightService = accessory.getServiceById(S.Switch, LIGHT_SUBTYPE)
         ?? accessory.addService(S.Switch, 'Display Light', LIGHT_SUBTYPE);
-      this.lightService.setCharacteristic(C.Name, 'Display Light');
+      this.setServiceName(this.lightService, 'Display Light');
       this.lightService.getCharacteristic(C.On)
         .onGet(() => this.state?.lightOn ?? false)
         .onSet(v => this.handleLightSet(v));
@@ -235,6 +237,19 @@ export class AirPurifierAccessory {
   }
 
   // --- helpers ---
+
+  /**
+   * Set both `Name` (the static, often hidden identifier) and `ConfiguredName`
+   * (the user-visible label Apple Home actually displays for sub-services).
+   * Without ConfiguredName, every sub-tile in iOS 16+ falls back to the
+   * accessory's own name — which is why all five Airmega sub-tiles previously
+   * read "Airmega 400S" instead of "Sleep" / "Eco" / "Display Light" / etc.
+   */
+  private setServiceName(svc: Service, name: string): void {
+    const C = this.platform.Characteristic;
+    svc.setCharacteristic(C.Name, name);
+    svc.setCharacteristic(C.ConfiguredName, name);
+  }
 
   private fanSpeedToHomeKit(s: number): number {
     return Math.round((s / 3) * 100);

@@ -23,6 +23,14 @@ export declare class AirPurifierAccessory {
     private refresh;
     private pushUpdates;
     private clearAllPresets;
+    /**
+     * Set both `Name` (the static, often hidden identifier) and `ConfiguredName`
+     * (the user-visible label Apple Home actually displays for sub-services).
+     * Without ConfiguredName, every sub-tile in iOS 16+ falls back to the
+     * accessory's own name — which is why all five Airmega sub-tiles previously
+     * read "Airmega 400S" instead of "Sleep" / "Eco" / "Display Light" / etc.
+     */
+    private setServiceName;
     private fanSpeedToHomeKit;
     private homeKitToFanSpeed;
 }
