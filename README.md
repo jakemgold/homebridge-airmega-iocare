@@ -34,6 +34,15 @@ Each registered purifier appears as a single tile with these controls:
 
 State refreshes on a configurable polling interval (default 60s). HomeKit reflects out-of-band changes made via the unit itself or the IoCare+ app.
 
+<p align="center">
+  <img src="docs/screenshots/home-purifier-tile.png" width="280" alt="Airmega purifier tile and Manual picker in Apple Home">
+  &nbsp;&nbsp;
+  <img src="docs/screenshots/home-preset-tiles.png" width="280" alt="Display Light and Eco preset sub-tiles in Apple Home">
+</p>
+<p align="center">
+  <em>Long-pressing the Airmega tile in Apple Home: the purifier itself with Auto/Manual picker, plus sub-tiles for the Display Light and the active Eco preset.</em>
+</p>
+
 ## Supported models
 
 The plugin targets the entire IoCare+ family — Coway uses the same API surface across these models, so most should work, but only the **400S has been verified live**.
