@@ -24,7 +24,11 @@ class AirmegaPlatform {
         this.api = api;
         this.Service = api.hap.Service;
         this.Characteristic = api.hap.Characteristic;
-        this.pollingInterval = (config?.pollingInterval ?? settings_1.DEFAULT_POLL_SECONDS) * 1000;
+        // Schema enforces minimum 30s but config.json is hand-edited too. Clamp in
+        // code so a misconfigured 0 (or anything below 30) can't tight-loop the
+        // Coway API and rate-limit the account.
+        const pollSeconds = Math.max(30, config?.pollingInterval ?? settings_1.DEFAULT_POLL_SECONDS);
+        this.pollingInterval = pollSeconds * 1000;
         if (!config?.username || !config?.password) {
             this.log.error('Username and password are required.');
             this.configured = false;
@@ -37,9 +41,16 @@ class AirmegaPlatform {
             skipPasswordChange: config.skipPasswordChange ?? true,
             log: this.log,
         });
+        // The CowayClient now owns the password. Drop our reference so a future
+        // log of `platform.config` (debug helper, error inspector, etc.) doesn't
+        // leak it.
+        config.password = '';
         this.api.on('didFinishLaunching', () => {
             this.discoverDevices().catch(err => {
-                this.log.error('Device discovery failed:', err);
+                // Log only the message — bare Error objects from axios carry .config
+                // and .request which include Authorization headers and the login
+                // form body (with the password) in their string form.
+                this.log.error('Device discovery failed:', err instanceof Error ? err.message : String(err));
             });
         });
     }

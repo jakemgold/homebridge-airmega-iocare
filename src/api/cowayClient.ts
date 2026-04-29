@@ -40,6 +40,12 @@ interface CowayDeviceRow {
 // matching cowayaio's behavior.
 const REFRESH_LEAD_MS = 5 * 60 * 1000;
 
+// Cap any single response we accept from Coway. The HTML scrape is the largest
+// legitimate response (~50 KB live), so 2 MB gives a comfortable margin while
+// preventing a misbehaving or hostile response from OOM-ing the Homebridge
+// process via axios's response buffer.
+const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+
 export class CowayClient {
   private tokens?: AuthTokens;
   private countryCode?: string;
@@ -146,6 +152,8 @@ export class CowayClient {
     const resp = await axios.post(url, payload, {
       headers: this.authHeaders(),
       timeout: 15000,
+      maxContentLength: MAX_RESPONSE_BYTES,
+      maxBodyLength: MAX_RESPONSE_BYTES,
       validateStatus: () => true,
     });
     const body = resp.data;
@@ -190,6 +198,8 @@ export class CowayClient {
         gravityUnit: 'lb',
       },
       timeout: 15000,
+      maxContentLength: MAX_RESPONSE_BYTES,
+      maxBodyLength: MAX_RESPONSE_BYTES,
       validateStatus: () => true,
       // The endpoint returns HTML; axios shouldn't try to parse JSON.
       responseType: 'text',
@@ -218,6 +228,8 @@ export class CowayClient {
         langCd: Header.ACCEPT_LANG,
       },
       timeout: 15000,
+      maxContentLength: MAX_RESPONSE_BYTES,
+      maxBodyLength: MAX_RESPONSE_BYTES,
       validateStatus: () => true,
     });
     const list = resp.data?.data?.suppliesList;
@@ -287,6 +299,8 @@ export class CowayClient {
       headers: this.authHeaders(),
       params,
       timeout: 15000,
+      maxContentLength: MAX_RESPONSE_BYTES,
+      maxBodyLength: MAX_RESPONSE_BYTES,
       validateStatus: () => true,
     };
     let resp = await axios.get(url, cfg);

@@ -1,6 +1,6 @@
 import axios, { AxiosResponse } from 'axios';
 import { Logger } from 'homebridge';
-import { URLSearchParams } from 'url';
+import { URL, URLSearchParams } from 'url';
 
 import { Endpoint, Parameter, Header, ErrorMessage } from './endpoints';
 
@@ -20,6 +20,19 @@ export interface LoginParams {
 // cowayaio reports the access token lifetime is 1 hour; we mirror that and
 // refresh proactively when the expiration is within 5 minutes.
 const ACCESS_TOKEN_TTL_MS = 60 * 60 * 1000;
+
+// Cap any single response we accept from Coway. The HTML scrape is the largest
+// legitimate response and runs ~50 KB; 2 MB gives a comfortable margin while
+// preventing a misbehaving or hostile response from OOM-ing the Homebridge
+// process via response-buffering inside axios.
+const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+
+// We extract URLs from HTML at two points in the login flow and then send
+// either the user's password (form action URL) or read an auth code (final
+// redirect URL) against them. Both URLs must live on a Coway host — anything
+// else is either a Coway HTML change we should fail on or a hostile response.
+const COWAY_AUTH_HOST = 'id.coway.com';
+const COWAY_BRIDGE_HOST = 'iocare-redirect.iotsvc.coway.com';
 
 export class AuthError extends Error {}
 export class PasswordExpiredError extends Error {}
@@ -61,6 +74,8 @@ export async function refreshAccessToken(refreshToken: string): Promise<AuthToke
         'user-agent': Header.COWAY_USER_AGENT,
       },
       timeout: 15000,
+      maxContentLength: MAX_RESPONSE_BYTES,
+      maxBodyLength: MAX_RESPONSE_BYTES,
       validateStatus: () => true,
     },
   );
@@ -99,6 +114,8 @@ async function fetchLoginPage(): Promise<{ loginActionUrl: string; cookies: stri
       'accept-language': Header.ACCEPT_LANG,
     },
     timeout: 15000,
+    maxContentLength: MAX_RESPONSE_BYTES,
+    maxBodyLength: MAX_RESPONSE_BYTES,
     validateStatus: () => true,
   });
 
@@ -123,6 +140,10 @@ async function submitCredentials(
   cookies: string,
   params: LoginParams,
 ): Promise<string> {
+  // Defense in depth: the action URL came out of HTML, so validate it points
+  // at Coway's auth host before we send the password to it.
+  assertCowayHost(actionUrl, COWAY_AUTH_HOST, 'login form action');
+
   const formBody = new URLSearchParams({
     clientName: Parameter.CLIENT_NAME,
     termAgreementStatus: '',
@@ -140,6 +161,8 @@ async function submitCredentials(
     },
     timeout: 15000,
     maxRedirects: 5,
+    maxContentLength: MAX_RESPONSE_BYTES,
+    maxBodyLength: MAX_RESPONSE_BYTES,
     validateStatus: () => true,
   });
 
@@ -153,6 +176,9 @@ async function handleAuthResponse(
 ): Promise<string> {
   const finalPath = readFinalPath(resp);
   if (finalPath?.includes('redirect_bridge_empty.html')) {
+    // Defense in depth: confirm we actually landed on Coway's bridge host
+    // before extracting an auth code from its query string.
+    assertCowayHost(finalPath, COWAY_BRIDGE_HOST, 'final redirect');
     const code = extractAuthCodeFromPath(finalPath);
     if (!code) {
       throw new AuthError('Coway redirected to bridge URL but no auth code was found.');
@@ -193,6 +219,9 @@ async function submitPasswordSkip(
   if (!skipActionUrl) {
     throw new AuthError('Coway password-change page did not contain a kc-password-change-form action URL.');
   }
+  // Same host check as the login form action URL.
+  assertCowayHost(skipActionUrl, COWAY_AUTH_HOST, 'password-skip form action');
+
   const formBody = new URLSearchParams({
     cmd: 'change_next_time',
     checkPasswordNeededYn: 'Y',
@@ -209,6 +238,8 @@ async function submitPasswordSkip(
     },
     timeout: 15000,
     maxRedirects: 5,
+    maxContentLength: MAX_RESPONSE_BYTES,
+    maxBodyLength: MAX_RESPONSE_BYTES,
     validateStatus: () => true,
   });
 
@@ -228,6 +259,8 @@ async function exchangeCodeForTokens(authCode: string): Promise<AuthTokens> {
         'accept-language': Header.COWAY_LANGUAGE,
       },
       timeout: 15000,
+      maxContentLength: MAX_RESPONSE_BYTES,
+      maxBodyLength: MAX_RESPONSE_BYTES,
       validateStatus: () => true,
     },
   );
@@ -253,6 +286,34 @@ async function exchangeCodeForTokens(authCode: string): Promise<AuthTokens> {
     refreshToken,
     expiresAt: Date.now() + ACCESS_TOKEN_TTL_MS,
   };
+}
+
+// --- Host validation ---
+
+/**
+ * Throw an AuthError if `rawUrl` doesn't parse, or if its host isn't the one
+ * we expect. We use this to check URLs we extracted from Coway's HTML before
+ * we either send credentials to them or extract auth codes from them — closes
+ * a defense-in-depth gap in case Coway's auth pages are ever compromised or
+ * the response is tampered with at the TLS boundary.
+ */
+function assertCowayHost(rawUrl: string, expectedHost: string, context: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new AuthError(`Coway returned an invalid URL for ${context}.`);
+  }
+  if (parsed.hostname !== expectedHost) {
+    throw new AuthError(
+      `Coway ${context} URL host mismatch: expected ${expectedHost}, got ${parsed.hostname}.`,
+    );
+  }
+  if (parsed.protocol !== 'https:') {
+    throw new AuthError(
+      `Coway ${context} URL is not HTTPS: got ${parsed.protocol}.`,
+    );
+  }
 }
 
 // --- HTML parsing helpers ---

@@ -180,9 +180,20 @@ export class AirPurifierAccessory {
   // --- polling ---
 
   private startPolling(): void {
-    this.refresh().catch(e => this.platform.log.warn(`${this.device.name}: initial refresh failed`, e));
+    // Log only the message — bare Error objects from axios may carry config
+    // and request properties that contain Authorization headers or the login
+    // form body in their stringified form.
+    this.refresh().catch(e =>
+      this.platform.log.warn(
+        `${this.device.name}: initial refresh failed: ${e instanceof Error ? e.message : String(e)}`,
+      ),
+    );
     this.pollHandle = setInterval(() => {
-      this.refresh().catch(e => this.platform.log.debug(`${this.device.name}: poll failed`, e));
+      this.refresh().catch(e =>
+        this.platform.log.debug(
+          `${this.device.name}: poll failed: ${e instanceof Error ? e.message : String(e)}`,
+        ),
+      );
     }, this.pollingInterval);
   }
 
