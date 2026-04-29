@@ -96,7 +96,7 @@ Implementation rules:
 
 ```json
 {
-  "displayName": "Homebridge Airmega 400S",
+  "displayName": "Homebridge Airmega IoCare+",
   "name": "homebridge-airmega-iocare",
   "version": "0.1.0",
   "description": "Homebridge plugin for the Coway Airmega 400S (and other IoCare+ purifiers)",
