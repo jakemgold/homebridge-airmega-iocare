@@ -85,7 +85,8 @@ class CowayClient {
         const status = readPath(purifierInfo, 'deviceStatusData.data.statusInfo.attributes') ?? {};
         const sensors = findSensorAttributes(purifierInfo);
         const aqGrade = readPath(purifierInfo, 'deviceModule.data.content.deviceModuleDetailInfo.airStatusInfo');
-        return assembleDeviceState(status, sensors, aqGrade, supplies);
+        const mcuVersion = findMcuVersion(purifierInfo);
+        return assembleDeviceState(status, sensors, aqGrade, supplies, mcuVersion);
     }
     /**
      * Send a single Coway control attribute write to the device.
@@ -461,6 +462,21 @@ function findSensorAttributes(purifierInfo) {
     }
     return {};
 }
+/**
+ * Walk purifier_info.coreData[*] for the entry whose `data` carries
+ * `currentMcuVer`. cowayaio reports this as the device's firmware version.
+ */
+function findMcuVersion(purifierInfo) {
+    const coreData = purifierInfo?.coreData;
+    if (!Array.isArray(coreData))
+        return undefined;
+    for (const entry of coreData) {
+        const ver = entry?.data?.currentMcuVer;
+        if (typeof ver === 'string' && ver.length > 0)
+            return ver;
+    }
+    return undefined;
+}
 function modeFromRegister(value) {
     switch (value) {
         case 1: return 'auto';
@@ -489,7 +505,7 @@ function pickNumber(...vals) {
     }
     return undefined;
 }
-function assembleDeviceState(status, sensors, aqGrade, supplies) {
+function assembleDeviceState(status, sensors, aqGrade, supplies, mcuVersion) {
     const power = status['0001'] === 1;
     const mode = modeFromRegister(status['0002']);
     const fanSpeed = clampFanSpeed(status['0003']);
@@ -520,6 +536,7 @@ function assembleDeviceState(status, sensors, aqGrade, supplies) {
         preFilterPct: preFilterPct ?? 100,
         max2FilterPct: max2FilterPct ?? 100,
         timerMinutesRemaining,
+        mcuVersion,
     };
 }
 function sensorDerivedFilterPct(sensors, key) {

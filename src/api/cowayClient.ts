@@ -131,8 +131,9 @@ export class CowayClient {
     const aqGrade = readPath<Record<string, unknown>>(
       purifierInfo, 'deviceModule.data.content.deviceModuleDetailInfo.airStatusInfo',
     );
+    const mcuVersion = findMcuVersion(purifierInfo);
 
-    return assembleDeviceState(status, sensors, aqGrade, supplies);
+    return assembleDeviceState(status, sensors, aqGrade, supplies, mcuVersion);
   }
 
   /**
@@ -560,6 +561,20 @@ function findSensorAttributes(purifierInfo: AnyObj): AnyObj {
   return {};
 }
 
+/**
+ * Walk purifier_info.coreData[*] for the entry whose `data` carries
+ * `currentMcuVer`. cowayaio reports this as the device's firmware version.
+ */
+function findMcuVersion(purifierInfo: AnyObj): string | undefined {
+  const coreData = purifierInfo?.coreData;
+  if (!Array.isArray(coreData)) return undefined;
+  for (const entry of coreData) {
+    const ver = entry?.data?.currentMcuVer;
+    if (typeof ver === 'string' && ver.length > 0) return ver;
+  }
+  return undefined;
+}
+
 function modeFromRegister(value: unknown): DeviceState['mode'] {
   switch (value) {
     case 1: return 'auto';
@@ -594,6 +609,7 @@ function assembleDeviceState(
   sensors: AnyObj,
   aqGrade: AnyObj | undefined,
   supplies: SuppliesEntry[],
+  mcuVersion: string | undefined,
 ): DeviceState {
   const power = status['0001'] === 1;
   const mode = modeFromRegister(status['0002']);
@@ -629,6 +645,7 @@ function assembleDeviceState(
     preFilterPct: preFilterPct ?? 100,
     max2FilterPct: max2FilterPct ?? 100,
     timerMinutesRemaining,
+    mcuVersion,
   };
 }
 

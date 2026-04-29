@@ -9,8 +9,10 @@ export declare class AirPurifierAccessory {
     private readonly airQuality;
     private readonly preFilter;
     private readonly max2Filter;
+    private readonly accessoryInfo;
     private readonly presetServices;
     private readonly lightService?;
+    private lastFirmwareRevision?;
     private readonly fanSpeedDebouncer;
     private state?;
     private pollHandle?;
@@ -23,6 +25,13 @@ export declare class AirPurifierAccessory {
     private startPolling;
     private refresh;
     private pushUpdates;
+    /**
+     * Update the AccessoryInformation FirmwareRevision when Coway returns a
+     * dotted-numeric MCU version. Skipped silently if the value doesn't match
+     * HAP's required format, since pushing a non-conforming string would only
+     * earn a warning and a revert to the default.
+     */
+    private pushFirmwareRevision;
     private clearAllPresets;
     /**
      * Set both `Name` (the static, often hidden identifier) and `ConfiguredName`

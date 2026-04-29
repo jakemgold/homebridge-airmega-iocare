@@ -6,7 +6,6 @@ export interface CowayDevice {
   productModel: string;   // e.g. 'AP-2015E' — the printed model on the unit
   placeId: string | number;
   serial?: string;
-  firmwareVersion?: string;
 }
 
 // Good / Moderate / Unhealthy / Very Unhealthy
@@ -27,4 +26,8 @@ export interface DeviceState {
   preFilterPct: number;   // 0–100
   max2FilterPct: number;  // 0–100
   timerMinutesRemaining?: number;
+  // Coway's MCU/firmware version string (e.g. '1.0.6'). Read from the same
+  // HTML-scrape `coreData` block as sensors and status; included on every poll
+  // so OTA updates flow through to the HomeKit FirmwareRevision characteristic.
+  mcuVersion?: string;
 }

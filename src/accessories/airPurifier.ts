@@ -22,6 +22,14 @@ const PRESETS: readonly PresetSpec[] = [
 
 const LIGHT_SUBTYPE = 'led';
 
+// HAP requires FirmwareRevision to be a dotted numeric string (e.g. '1.0.6').
+// Anything that doesn't match raises a "not a valid value" warning and the
+// characteristic falls back to its default — so we validate before pushing.
+const FIRMWARE_REVISION_RE = /^\d+(\.\d+){0,2}$/;
+// Used until the first state poll lands a real value, and as a defensive
+// fallback if Coway ever returns a non-numeric MCU string.
+const FIRMWARE_REVISION_FALLBACK = '0.0.0';
+
 // Coalesce rapid-fire characteristic writes (Apple Home spams them when the
 // user drags a slider) and only fire the latest value once the user pauses.
 // 250ms is short enough that the user perceives the action as immediate but
@@ -35,8 +43,10 @@ export class AirPurifierAccessory {
   private readonly airQuality: Service;
   private readonly preFilter: Service;
   private readonly max2Filter: Service;
+  private readonly accessoryInfo: Service;
   private readonly presetServices = new Map<PresetSpec['key'], Service>();
   private readonly lightService?: Service;
+  private lastFirmwareRevision?: string;
 
   private readonly fanSpeedDebouncer: Debouncer<1 | 2 | 3>;
 
@@ -61,10 +71,12 @@ export class AirPurifierAccessory {
     const C = platform.Characteristic;
     const S = platform.Service;
 
-    accessory.getService(S.AccessoryInformation)!
+    this.accessoryInfo = accessory.getService(S.AccessoryInformation)!;
+    this.accessoryInfo
       .setCharacteristic(C.Manufacturer, 'Coway')
       .setCharacteristic(C.Model, this.device.productModel ?? this.device.model)
-      .setCharacteristic(C.SerialNumber, this.device.serial ?? this.device.deviceId);
+      .setCharacteristic(C.SerialNumber, this.device.serial ?? this.device.deviceId)
+      .setCharacteristic(C.FirmwareRevision, FIRMWARE_REVISION_FALLBACK);
 
     this.purifier = accessory.getService(S.AirPurifier) ?? accessory.addService(S.AirPurifier);
     this.setServiceName(this.purifier, this.device.name);
@@ -262,6 +274,23 @@ export class AirPurifierAccessory {
     }
 
     this.lightService?.updateCharacteristic(C.On, this.state.lightOn);
+
+    this.pushFirmwareRevision(this.state.mcuVersion);
+  }
+
+  /**
+   * Update the AccessoryInformation FirmwareRevision when Coway returns a
+   * dotted-numeric MCU version. Skipped silently if the value doesn't match
+   * HAP's required format, since pushing a non-conforming string would only
+   * earn a warning and a revert to the default.
+   */
+  private pushFirmwareRevision(mcuVersion: string | undefined): void {
+    if (!mcuVersion || !FIRMWARE_REVISION_RE.test(mcuVersion)) return;
+    if (mcuVersion === this.lastFirmwareRevision) return;
+    this.accessoryInfo.updateCharacteristic(
+      this.platform.Characteristic.FirmwareRevision, mcuVersion,
+    );
+    this.lastFirmwareRevision = mcuVersion;
   }
 
   private clearAllPresets(): void {
