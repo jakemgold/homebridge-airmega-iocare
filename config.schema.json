@@ -12,7 +12,8 @@
         "required": true
       },
       "username": {
-        "title": "IoCare+ Username (email)",
+        "title": "IoCare+ Username",
+        "description": "Your IoCare+ login — email address or phone number.",
         "type": "string",
         "required": true
       },
