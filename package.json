@@ -14,6 +14,7 @@
     "url": "git+https://github.com/jakemgold/homebridge-airmega-iocare.git"
   },
   "main": "dist/index.js",
+  "icon": "icon.png",
   "engines": {
     "node": ">=18.20.4",
     "homebridge": "^1.8.0 || ^2.0.0-beta.0"
