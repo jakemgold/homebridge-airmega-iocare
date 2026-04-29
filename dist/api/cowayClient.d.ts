@@ -40,10 +40,11 @@ export declare class CowayClient {
     /**
      * GET a JSON endpoint with the standard authorized headers, refreshing the
      * access token first if it's close to expiry. On a 401 we attempt one
-     * refresh-and-retry before giving up.
+     * refresh-and-retry before giving up. 5xx and 429 responses get the
+     * standard exponential-backoff retry loop.
      */
     private authedJsonGet;
-    private parseJsonBody;
+    private parseJsonResponse;
     private authHeaders;
     private ensureFreshToken;
     private forceRefresh;

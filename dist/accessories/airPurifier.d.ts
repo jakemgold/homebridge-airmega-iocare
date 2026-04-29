@@ -11,6 +11,7 @@ export declare class AirPurifierAccessory {
     private readonly max2Filter;
     private readonly presetServices;
     private readonly lightService?;
+    private readonly fanSpeedDebouncer;
     private state?;
     private pollHandle?;
     constructor(platform: AirmegaPlatform, accessory: PlatformAccessory, pollingInterval: number);

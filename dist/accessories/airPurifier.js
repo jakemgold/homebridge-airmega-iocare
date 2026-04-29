@@ -8,6 +8,11 @@ const PRESETS = [
     { key: 'smart', subtype: 'preset-smart', display: 'Smart', modeValue: deviceCodes_1.ModeValue.RAPID, apiMode: 'rapid' },
 ];
 const LIGHT_SUBTYPE = 'led';
+// Coalesce rapid-fire characteristic writes (Apple Home spams them when the
+// user drags a slider) and only fire the latest value once the user pauses.
+// 250ms is short enough that the user perceives the action as immediate but
+// long enough to absorb a typical drag.
+const SETTER_DEBOUNCE_MS = 250;
 class AirPurifierAccessory {
     platform;
     accessory;
@@ -19,6 +24,7 @@ class AirPurifierAccessory {
     max2Filter;
     presetServices = new Map();
     lightService;
+    fanSpeedDebouncer;
     state;
     pollHandle;
     constructor(platform, accessory, pollingInterval) {
@@ -26,6 +32,14 @@ class AirPurifierAccessory {
         this.accessory = accessory;
         this.pollingInterval = pollingInterval;
         this.device = accessory.context.device;
+        this.fanSpeedDebouncer = new Debouncer(SETTER_DEBOUNCE_MS, async (speed) => {
+            try {
+                await this.platform.client.sendCommand(this.device, deviceCodes_1.Attribute.FAN_SPEED, String(speed));
+            }
+            catch (err) {
+                this.platform.log.warn(`${this.device.name}: fan speed command failed: ${err instanceof Error ? err.message : String(err)}`);
+            }
+        });
         const C = platform.Characteristic;
         const S = platform.Service;
         accessory.getService(S.AccessoryInformation)
@@ -112,12 +126,19 @@ class AirPurifierAccessory {
     }
     async handleRotationSpeedSet(value) {
         const speed = this.homeKitToFanSpeed(value);
-        await this.platform.client.sendCommand(this.device, deviceCodes_1.Attribute.FAN_SPEED, String(speed));
+        // Update local state optimistically so the next characteristic read is
+        // consistent and HomeKit doesn't show stale values during the debounce
+        // window.
         if (this.state) {
             this.state.fanSpeed = speed;
             this.state.mode = 'manual';
         }
         this.clearAllPresets();
+        // When the user drags the speed slider, Apple Home spams onSet calls
+        // (often three or four per drag). Coalesce them and only fire the latest
+        // value to Coway after the user pauses, capping API traffic and avoiding
+        // visible flicker as multiple commands settle.
+        this.fanSpeedDebouncer.schedule(speed);
     }
     async handlePresetSet(preset, value) {
         if (value) {
@@ -229,4 +250,33 @@ class AirPurifierAccessory {
     }
 }
 exports.AirPurifierAccessory = AirPurifierAccessory;
+/**
+ * Coalesces rapid-fire writes into a single trailing call. Each `schedule(v)`
+ * (re)starts a timer; when the timer fires, the most-recent value is passed
+ * to `onFire`. We use this for the fan-speed slider where Apple Home emits
+ * several onSet callbacks per drag — without it, every intermediate value
+ * round-trips to Coway and the user sees flicker as commands settle.
+ */
+class Debouncer {
+    delayMs;
+    onFire;
+    timer;
+    latest;
+    constructor(delayMs, onFire) {
+        this.delayMs = delayMs;
+        this.onFire = onFire;
+    }
+    schedule(value) {
+        this.latest = value;
+        if (this.timer)
+            clearTimeout(this.timer);
+        this.timer = setTimeout(() => {
+            this.timer = undefined;
+            const v = this.latest;
+            // Errors must be caught here — the setTimeout callback is detached from
+            // any caller and an unhandled rejection would crash Homebridge.
+            this.onFire(v).catch(() => undefined);
+        }, this.delayMs);
+    }
+}
 //# sourceMappingURL=airPurifier.js.map

@@ -1,8 +1,8 @@
-import axios, { AxiosRequestConfig } from 'axios';
+import axios, { AxiosRequestConfig, AxiosResponse } from 'axios';
 import { Logger } from 'homebridge';
 
 import {
-  AuthTokens, AuthError, performLogin, refreshAccessToken,
+  AuthTokens, AuthError, RateLimitedError, performLogin, refreshAccessToken,
 } from './auth';
 import {
   CATEGORY_NAME, Endpoint, ErrorMessage, Header, Parameter,
@@ -45,6 +45,13 @@ const REFRESH_LEAD_MS = 5 * 60 * 1000;
 // preventing a misbehaving or hostile response from OOM-ing the Homebridge
 // process via axios's response buffer.
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+
+// Retry parameters for transient server-side failures (5xx) and rate-limit
+// responses (429). Cap at 5 attempts per HANDOFF.md — beyond that, surface a
+// warn-level log and let the next polling cycle naturally retry.
+const RETRY_MAX_ATTEMPTS = 5;
+const RETRY_INITIAL_DELAY_MS = 1000;
+const RETRY_MAX_DELAY_MS = 16000;
 
 export class CowayClient {
   private tokens?: AuthTokens;
@@ -173,38 +180,42 @@ export class CowayClient {
   private async fetchPurifierJson(device: CowayDevice): Promise<PurifierScrape | null> {
     await this.ensureFreshToken();
     const url = `${Endpoint.PURIFIER_HTML_BASE}/${device.placeId}/product/${device.modelCode}`;
-    const resp = await axios.get(url, {
-      headers: {
-        'theme': Header.THEME,
-        'callingpage': Header.CALLING_PAGE,
-        'accept': Header.ACCEPT,
-        'dvcnick': device.name,
-        'timezoneid': Parameter.TIMEZONE,
-        'appversion': Parameter.APP_VERSION,
-        // The HTML scrape endpoint uses a custom 'accesstoken' header, NOT
-        // the standard Authorization Bearer. Verified against cowayaio.
-        'accesstoken': this.tokens!.accessToken,
-        'accept-language': Header.COWAY_LANGUAGE,
-        'region': 'NUS',
-        'user-agent': Header.HTML_USER_AGENT,
-        'srcpath': Header.SOURCE_PATH,
-        'deviceserial': device.deviceId,
-      },
-      params: {
-        bottomSlide: 'false',
-        tab: '0',
-        temperatureUnit: 'F',
-        weightUnit: 'oz',
-        gravityUnit: 'lb',
-      },
-      timeout: 15000,
-      maxContentLength: MAX_RESPONSE_BYTES,
-      maxBodyLength: MAX_RESPONSE_BYTES,
-      validateStatus: () => true,
-      // The endpoint returns HTML; axios shouldn't try to parse JSON.
-      responseType: 'text',
-      transformResponse: [d => d],
-    });
+    const resp = await withRetry<string>(
+      () => axios.get(url, {
+        headers: {
+          'theme': Header.THEME,
+          'callingpage': Header.CALLING_PAGE,
+          'accept': Header.ACCEPT,
+          'dvcnick': device.name,
+          'timezoneid': Parameter.TIMEZONE,
+          'appversion': Parameter.APP_VERSION,
+          // The HTML scrape endpoint uses a custom 'accesstoken' header, NOT
+          // the standard Authorization Bearer. Verified against cowayaio.
+          'accesstoken': this.tokens!.accessToken,
+          'accept-language': Header.COWAY_LANGUAGE,
+          'region': 'NUS',
+          'user-agent': Header.HTML_USER_AGENT,
+          'srcpath': Header.SOURCE_PATH,
+          'deviceserial': device.deviceId,
+        },
+        params: {
+          bottomSlide: 'false',
+          tab: '0',
+          temperatureUnit: 'F',
+          weightUnit: 'oz',
+          gravityUnit: 'lb',
+        },
+        timeout: 15000,
+        maxContentLength: MAX_RESPONSE_BYTES,
+        maxBodyLength: MAX_RESPONSE_BYTES,
+        validateStatus: () => true,
+        // The endpoint returns HTML; axios shouldn't try to parse JSON.
+        responseType: 'text',
+        transformResponse: [d => d],
+      }),
+      this.opts.log,
+      `purifier HTML for ${device.name}`,
+    );
     if (resp.status !== 200 || typeof resp.data !== 'string') {
       throw new Error(`Coway purifier HTML fetch failed for ${device.name}: HTTP ${resp.status}`);
     }
@@ -214,24 +225,28 @@ export class CowayClient {
   private async fetchSupplies(device: CowayDevice): Promise<SuppliesEntry[]> {
     const url = `${Endpoint.SECONDARY_BASE}${Endpoint.PLACES}/${device.placeId}/devices/${device.deviceId}/supplies`;
     await this.ensureFreshToken();
-    const resp = await axios.get(url, {
-      headers: {
-        'region': 'NUS',
-        'accept': 'application/json, text/plain, */*',
-        'authorization': `Bearer ${this.tokens!.accessToken}`,
-        'accept-language': Header.COWAY_LANGUAGE,
-        'user-agent': Header.HTML_USER_AGENT,
-      },
-      params: {
-        membershipYn: 'N',
-        membershipType: '',
-        langCd: Header.ACCEPT_LANG,
-      },
-      timeout: 15000,
-      maxContentLength: MAX_RESPONSE_BYTES,
-      maxBodyLength: MAX_RESPONSE_BYTES,
-      validateStatus: () => true,
-    });
+    const resp = await withRetry(
+      () => axios.get(url, {
+        headers: {
+          'region': 'NUS',
+          'accept': 'application/json, text/plain, */*',
+          'authorization': `Bearer ${this.tokens!.accessToken}`,
+          'accept-language': Header.COWAY_LANGUAGE,
+          'user-agent': Header.HTML_USER_AGENT,
+        },
+        params: {
+          membershipYn: 'N',
+          membershipType: '',
+          langCd: Header.ACCEPT_LANG,
+        },
+        timeout: 15000,
+        maxContentLength: MAX_RESPONSE_BYTES,
+        maxBodyLength: MAX_RESPONSE_BYTES,
+        validateStatus: () => true,
+      }),
+      this.opts.log,
+      `supplies for ${device.name}`,
+    );
     const list = resp.data?.data?.suppliesList;
     return Array.isArray(list) ? (list as SuppliesEntry[]) : [];
   }
@@ -290,30 +305,45 @@ export class CowayClient {
   /**
    * GET a JSON endpoint with the standard authorized headers, refreshing the
    * access token first if it's close to expiry. On a 401 we attempt one
-   * refresh-and-retry before giving up.
+   * refresh-and-retry before giving up. 5xx and 429 responses get the
+   * standard exponential-backoff retry loop.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private async authedJsonGet(url: string, params?: Record<string, any>): Promise<any> {
     await this.ensureFreshToken();
-    const cfg: AxiosRequestConfig = {
+    const buildCfg = (): AxiosRequestConfig => ({
       headers: this.authHeaders(),
       params,
       timeout: 15000,
       maxContentLength: MAX_RESPONSE_BYTES,
       maxBodyLength: MAX_RESPONSE_BYTES,
       validateStatus: () => true,
-    };
-    let resp = await axios.get(url, cfg);
+    });
+    let resp = await withRetry(() => axios.get(url, buildCfg()), this.opts.log, url);
     if (resp.status === 401) {
       await this.forceRefresh();
-      cfg.headers = this.authHeaders();
-      resp = await axios.get(url, cfg);
+      resp = await withRetry(() => axios.get(url, buildCfg()), this.opts.log, url);
     }
-    return this.parseJsonBody(resp.data, url);
+    return this.parseJsonResponse(resp, url);
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private parseJsonBody(body: any, url: string): any {
+  private parseJsonResponse(resp: AxiosResponse, url: string): any {
+    // Status-code-based error mapping comes first so we don't depend on
+    // matching Coway's localized message strings to recognize a 429 or 401.
+    if (resp.status === 401) {
+      throw new AuthError(`Coway auth error on ${url}: HTTP 401`);
+    }
+    if (resp.status === 429) {
+      throw new RateLimitedError(
+        `Coway rate-limited on ${url}: HTTP 429. Wait at least an hour before retrying.`,
+      );
+    }
+    if (resp.status >= 500) {
+      throw new Error(`Coway server error on ${url}: HTTP ${resp.status}`);
+    }
+
+    const body = resp.data;
     if (!body || typeof body !== 'object') {
       throw new Error(`Coway returned non-JSON for ${url}`);
     }
@@ -373,6 +403,53 @@ export class CowayClient {
   }
 }
 
+// --- Retry helper ---
+
+/**
+ * Run an axios call with exponential backoff on transient failures
+ * (5xx and 429). Stops after RETRY_MAX_ATTEMPTS or as soon as the response
+ * looks final (anything else, including 4xx auth errors). The caller still
+ * gets the last response if every attempt failed — they decide whether to
+ * propagate that as an exception.
+ */
+async function withRetry<T = unknown>(
+  attempt: () => Promise<AxiosResponse<T>>,
+  log: Logger,
+  context: string,
+): Promise<AxiosResponse<T>> {
+  let delay = RETRY_INITIAL_DELAY_MS;
+  let last: AxiosResponse<T> | undefined;
+  for (let i = 1; i <= RETRY_MAX_ATTEMPTS; i++) {
+    last = await attempt();
+    if (!isRetryableStatus(last.status)) {
+      if (i > 1) {
+        log.debug(`Coway ${context}: succeeded after ${i} attempt(s).`);
+      }
+      return last;
+    }
+    if (i === RETRY_MAX_ATTEMPTS) break;
+    // Add jitter so multiple devices polling on the same interval don't all
+    // re-hit Coway in lockstep when it returns a 5xx wave.
+    const jitter = Math.random() * 500;
+    log.debug(
+      `Coway ${context}: HTTP ${last.status}, retrying in ${Math.round((delay + jitter) / 100) / 10}s ` +
+      `(attempt ${i + 1}/${RETRY_MAX_ATTEMPTS}).`,
+    );
+    await sleep(delay + jitter);
+    delay = Math.min(delay * 2, RETRY_MAX_DELAY_MS);
+  }
+  log.warn(`Coway ${context}: gave up after ${RETRY_MAX_ATTEMPTS} attempts (last status ${last!.status}).`);
+  return last!;
+}
+
+function isRetryableStatus(status: number): boolean {
+  return status === 429 || (status >= 500 && status <= 599);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 // --- HTML scrape and state-assembly helpers (module-private) ---
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -389,9 +466,20 @@ interface SuppliesEntry {
 /**
  * The Airmega state HTML has a single <script> tag whose body contains the
  * product page's full JSON state model. cowayaio targets it via
- * `script:-soup-contains("sensorInfo")` and slices from first `{` to last `}`,
- * stripping backslashes (the JSON arrives backslash-escaped). We mirror that
- * exactly — anything more clever risks drifting from the live shape.
+ * `script:-soup-contains("sensorInfo")` and slices from first `{` to last `}`.
+ *
+ * Coway embeds the JSON with one round of string-escaping (so `"foo"` arrives
+ * as `\"foo\"`, etc.). cowayaio handles this by stripping every backslash —
+ * which works against the live API today but corrupts any string that
+ * legitimately contains a backslash. We layer a safer approach on top:
+ *
+ *   1. Try parsing the slice as plain JSON. If Coway ever stops over-escaping
+ *      this just works.
+ *   2. Fall back to the cowayaio-style blanket strip and parse again.
+ *
+ * Both attempts run a reviver that drops `__proto__` / `constructor` /
+ * `prototype` keys to block prototype-pollution gadgets in case the input is
+ * tampered with despite our TLS + host-validation defenses.
  */
 function extractPurifierJsonFromHtml(html: string): PurifierScrape | null {
   const scriptRe = /<script\b[^>]*>([\s\S]*?)<\/script>/gi;
@@ -402,15 +490,37 @@ function extractPurifierJsonFromHtml(html: string): PurifierScrape | null {
     const start = body.indexOf('{');
     const end = body.lastIndexOf('}');
     if (start < 0 || end <= start) continue;
-    const slice = body.slice(start, end + 1).replace(/\\/g, '');
-    try {
-      return JSON.parse(slice) as PurifierScrape;
-    } catch {
-      // Try the next matching script tag in case there's a non-JSON candidate.
-      continue;
-    }
+    const raw = body.slice(start, end + 1);
+
+    // Path 1: maybe Coway is already returning plain JSON.
+    const direct = safeJsonParse(raw);
+    if (direct) return direct as PurifierScrape;
+
+    // Path 2: cowayaio's blanket-strip fallback for the current
+    // double-escaped form. Lossy for fields with legitimate backslashes,
+    // but matches the live shape today.
+    const stripped = safeJsonParse(raw.replace(/\\/g, ''));
+    if (stripped) return stripped as PurifierScrape;
   }
   return null;
+}
+
+const DANGEROUS_JSON_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+/**
+ * `JSON.parse` with a reviver that strips keys commonly used in
+ * prototype-pollution exploits. Returns null if the input doesn't parse —
+ * the caller decides whether to fall back to a different decoding strategy.
+ */
+function safeJsonParse(text: string): unknown {
+  try {
+    return JSON.parse(text, (key, value) => {
+      if (DANGEROUS_JSON_KEYS.has(key)) return undefined;
+      return value;
+    });
+  } catch {
+    return null;
+  }
 }
 
 function findFirstObject(arr: unknown): AnyObj | null {
