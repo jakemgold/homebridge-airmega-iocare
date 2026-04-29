@@ -1,0 +1,247 @@
+import {
+  PlatformAccessory, Service, CharacteristicValue,
+} from 'homebridge';
+
+import { AirmegaPlatform } from '../platform';
+import { CowayDevice, DeviceState } from '../api/types';
+import { Attribute, ModeValue, LightMode } from './deviceCodes';
+
+interface PresetSpec {
+  key: 'sleep' | 'eco' | 'smart';
+  subtype: string;
+  display: string;
+  modeValue: string;
+  apiMode: DeviceState['mode'];
+}
+
+const PRESETS: readonly PresetSpec[] = [
+  { key: 'sleep', subtype: 'preset-sleep', display: 'Sleep', modeValue: ModeValue.NIGHT, apiMode: 'night' },
+  { key: 'eco',   subtype: 'preset-eco',   display: 'Eco',   modeValue: ModeValue.ECO,   apiMode: 'eco' },
+  { key: 'smart', subtype: 'preset-smart', display: 'Smart', modeValue: ModeValue.RAPID, apiMode: 'rapid' },
+];
+
+const LIGHT_SUBTYPE = 'led';
+
+export class AirPurifierAccessory {
+  private readonly device: CowayDevice;
+
+  private readonly purifier: Service;
+  private readonly airQuality: Service;
+  private readonly preFilter: Service;
+  private readonly max2Filter: Service;
+  private readonly presetServices = new Map<PresetSpec['key'], Service>();
+  private readonly lightService?: Service;
+
+  private state?: DeviceState;
+  private pollHandle?: NodeJS.Timeout;
+
+  constructor(
+    private readonly platform: AirmegaPlatform,
+    private readonly accessory: PlatformAccessory,
+    private readonly pollingInterval: number,
+  ) {
+    this.device = accessory.context.device as CowayDevice;
+    const C = platform.Characteristic;
+    const S = platform.Service;
+
+    accessory.getService(S.AccessoryInformation)!
+      .setCharacteristic(C.Manufacturer, 'Coway')
+      .setCharacteristic(C.Model, this.device.productModel ?? this.device.model)
+      .setCharacteristic(C.SerialNumber, this.device.serial ?? this.device.deviceId);
+
+    this.purifier = accessory.getService(S.AirPurifier) ?? accessory.addService(S.AirPurifier);
+    this.purifier.setCharacteristic(C.Name, this.device.name);
+    // Mark the AirPurifier as the primary service so Apple Home shows the
+    // purifier tile, with the preset switches and air-quality sensor surfacing
+    // as sub-tiles.
+    this.purifier.setPrimaryService(true);
+
+    this.purifier.getCharacteristic(C.Active)
+      .onGet(() => this.state?.power ? 1 : 0)
+      .onSet(v => this.handlePowerSet(v));
+
+    this.purifier.getCharacteristic(C.CurrentAirPurifierState)
+      .onGet(() => this.state?.power ? 2 : 0); // 2 = purifying, 0 = inactive
+
+    this.purifier.getCharacteristic(C.TargetAirPurifierState)
+      .onGet(() => this.state?.mode === 'auto' ? 1 : 0)
+      .onSet(v => this.handleTargetStateSet(v));
+
+    this.purifier.getCharacteristic(C.RotationSpeed)
+      .setProps({ minStep: 100 / 3 })
+      .onGet(() => this.fanSpeedToHomeKit(this.state?.fanSpeed ?? 1))
+      .onSet(v => this.handleRotationSpeedSet(v));
+
+    this.airQuality = accessory.getService(S.AirQualitySensor)
+      ?? accessory.addService(S.AirQualitySensor);
+    this.airQuality.setCharacteristic(C.Name, 'Air Quality');
+    this.airQuality.getCharacteristic(C.AirQuality)
+      .onGet(() => this.state?.airQuality ?? 0);
+
+    this.preFilter = accessory.getServiceById(S.FilterMaintenance, 'pre')
+      ?? accessory.addService(S.FilterMaintenance, 'Pre-filter', 'pre');
+    this.max2Filter = accessory.getServiceById(S.FilterMaintenance, 'max2')
+      ?? accessory.addService(S.FilterMaintenance, 'Max2 Filter', 'max2');
+
+    for (const preset of PRESETS) {
+      const svc = accessory.getServiceById(S.Switch, preset.subtype)
+        ?? accessory.addService(S.Switch, preset.display, preset.subtype);
+      svc.setCharacteristic(C.Name, preset.display);
+      svc.getCharacteristic(C.On)
+        .onGet(() => this.state?.mode === preset.apiMode)
+        .onSet(v => this.handlePresetSet(preset, v));
+      this.presetServices.set(preset.key, svc);
+    }
+
+    const exposeLight = platform.config.exposeLight ?? true;
+    if (exposeLight) {
+      this.lightService = accessory.getServiceById(S.Switch, LIGHT_SUBTYPE)
+        ?? accessory.addService(S.Switch, 'Display Light', LIGHT_SUBTYPE);
+      this.lightService.setCharacteristic(C.Name, 'Display Light');
+      this.lightService.getCharacteristic(C.On)
+        .onGet(() => this.state?.lightOn ?? false)
+        .onSet(v => this.handleLightSet(v));
+    } else {
+      // If the user disabled light exposure, remove a previously-registered service.
+      const stale = accessory.getServiceById(S.Switch, LIGHT_SUBTYPE);
+      if (stale) accessory.removeService(stale);
+    }
+
+    this.startPolling();
+  }
+
+  // --- characteristic handlers ---
+
+  private async handlePowerSet(value: CharacteristicValue): Promise<void> {
+    const target = value === 1;
+    await this.platform.client.sendCommand(this.device, Attribute.POWER, target ? '1' : '0');
+    if (this.state) this.state.power = target;
+  }
+
+  private async handleTargetStateSet(value: CharacteristicValue): Promise<void> {
+    if (value === 1) {
+      await this.platform.client.sendCommand(this.device, Attribute.MODE, ModeValue.AUTO);
+      if (this.state) this.state.mode = 'auto';
+      this.clearAllPresets();
+      return;
+    }
+    // Going to manual: writing fan speed implicitly switches the device out of auto.
+    // We re-send the current fan speed so we don't accidentally jump to a new speed.
+    const fan = this.state?.fanSpeed ?? 1;
+    await this.platform.client.sendCommand(this.device, Attribute.FAN_SPEED, String(fan));
+    if (this.state) this.state.mode = 'manual';
+    this.clearAllPresets();
+  }
+
+  private async handleRotationSpeedSet(value: CharacteristicValue): Promise<void> {
+    const speed = this.homeKitToFanSpeed(value as number);
+    await this.platform.client.sendCommand(this.device, Attribute.FAN_SPEED, String(speed));
+    if (this.state) {
+      this.state.fanSpeed = speed;
+      this.state.mode = 'manual';
+    }
+    this.clearAllPresets();
+  }
+
+  private async handlePresetSet(preset: PresetSpec, value: CharacteristicValue): Promise<void> {
+    if (value) {
+      await this.platform.client.sendCommand(this.device, Attribute.MODE, preset.modeValue);
+      if (this.state) this.state.mode = preset.apiMode;
+      // Mutual exclusion: clear the other two preset switches synchronously.
+      for (const other of PRESETS) {
+        if (other.key === preset.key) continue;
+        const svc = this.presetServices.get(other.key);
+        svc?.updateCharacteristic(this.platform.Characteristic.On, false);
+      }
+      return;
+    }
+    // Per HANDOFF.md: when a preset is explicitly turned off and no other preset
+    // is being activated, do nothing. The next poll reconciles. This avoids
+    // sending a stray manual/auto command when the user is mid-switch between
+    // presets (HomeKit sends OFF on the old switch before ON on the new one).
+  }
+
+  private async handleLightSet(value: CharacteristicValue): Promise<void> {
+    if (this.state && !this.state.power) {
+      // Per cowayaio's docs the 400S ignores light commands when the unit is
+      // off. Reflect that in HomeKit by snapping the toggle back.
+      this.platform.log.debug(`${this.device.name}: ignoring light toggle while power is off`);
+      this.lightService?.updateCharacteristic(this.platform.Characteristic.On, this.state.lightOn);
+      return;
+    }
+    await this.platform.client.sendCommand(
+      this.device, Attribute.LIGHT, value ? LightMode.ON : LightMode.OFF,
+    );
+    if (this.state) this.state.lightOn = !!value;
+  }
+
+  // --- polling ---
+
+  private startPolling(): void {
+    this.refresh().catch(e => this.platform.log.warn(`${this.device.name}: initial refresh failed`, e));
+    this.pollHandle = setInterval(() => {
+      this.refresh().catch(e => this.platform.log.debug(`${this.device.name}: poll failed`, e));
+    }, this.pollingInterval);
+  }
+
+  private async refresh(): Promise<void> {
+    this.state = await this.platform.client.getDeviceState(this.device);
+    this.pushUpdates();
+  }
+
+  private pushUpdates(): void {
+    if (!this.state) return;
+    const C = this.platform.Characteristic;
+
+    this.purifier.updateCharacteristic(C.Active, this.state.power ? 1 : 0);
+    this.purifier.updateCharacteristic(C.CurrentAirPurifierState, this.state.power ? 2 : 0);
+    this.purifier.updateCharacteristic(
+      C.TargetAirPurifierState, this.state.mode === 'auto' ? 1 : 0,
+    );
+    this.purifier.updateCharacteristic(
+      C.RotationSpeed, this.fanSpeedToHomeKit(this.state.fanSpeed),
+    );
+
+    this.airQuality.updateCharacteristic(C.AirQuality, this.state.airQuality);
+    if (this.state.pm25 !== undefined) {
+      this.airQuality.updateCharacteristic(C.PM2_5Density, this.state.pm25);
+    }
+    if (this.state.pm10 !== undefined) {
+      this.airQuality.updateCharacteristic(C.PM10Density, this.state.pm10);
+    }
+
+    this.preFilter.updateCharacteristic(C.FilterLifeLevel, this.state.preFilterPct);
+    this.preFilter.updateCharacteristic(
+      C.FilterChangeIndication, this.state.preFilterPct < 10 ? 1 : 0,
+    );
+    this.max2Filter.updateCharacteristic(C.FilterLifeLevel, this.state.max2FilterPct);
+    this.max2Filter.updateCharacteristic(
+      C.FilterChangeIndication, this.state.max2FilterPct < 10 ? 1 : 0,
+    );
+
+    for (const preset of PRESETS) {
+      const svc = this.presetServices.get(preset.key);
+      svc?.updateCharacteristic(C.On, this.state.mode === preset.apiMode);
+    }
+
+    this.lightService?.updateCharacteristic(C.On, this.state.lightOn);
+  }
+
+  private clearAllPresets(): void {
+    const C = this.platform.Characteristic;
+    for (const preset of PRESETS) {
+      this.presetServices.get(preset.key)?.updateCharacteristic(C.On, false);
+    }
+  }
+
+  // --- helpers ---
+
+  private fanSpeedToHomeKit(s: number): number {
+    return Math.round((s / 3) * 100);
+  }
+  private homeKitToFanSpeed(pct: number): 1 | 2 | 3 {
+    if (pct <= 33) return 1;
+    if (pct <= 66) return 2;
+    return 3;
+  }
+}

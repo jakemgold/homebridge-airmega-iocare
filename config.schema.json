@@ -1,0 +1,44 @@
+{
+  "pluginAlias": "AirmegaPlatform",
+  "pluginType": "platform",
+  "singular": true,
+  "schema": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "title": "Name",
+        "type": "string",
+        "default": "Airmega",
+        "required": true
+      },
+      "username": {
+        "title": "IoCare+ Username (email)",
+        "type": "string",
+        "required": true
+      },
+      "password": {
+        "title": "IoCare+ Password",
+        "type": "string",
+        "required": true,
+        "x-schema-form": { "type": "password" }
+      },
+      "skipPasswordChange": {
+        "title": "Skip 60-day password change prompt",
+        "type": "boolean",
+        "default": true,
+        "description": "Coway forces password rotation every 60 days. Leave true to defer; set false to be re-prompted via reauth."
+      },
+      "pollingInterval": {
+        "title": "Polling interval (seconds)",
+        "type": "integer",
+        "default": 60,
+        "minimum": 30
+      },
+      "exposeLight": {
+        "title": "Expose LED display as a switch",
+        "type": "boolean",
+        "default": true
+      }
+    }
+  }
+}
