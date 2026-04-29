@@ -103,14 +103,13 @@ Implementation rules:
   "license": "MIT",
   "main": "dist/index.js",
   "engines": {
-    "node": "^18.20.4 || ^20.15.1 || ^22",
+    "node": ">=18.20.4",
     "homebridge": "^1.8.0 || ^2.0.0-beta.0"
   },
   "scripts": {
     "lint": "eslint src/**/*.ts",
     "watch": "npm run build && npm link && nodemon",
-    "build": "rimraf ./dist && tsc",
-    "prepare": "npm run build",
+    "build": "rm -rf ./dist && tsc",
     "prepublishOnly": "npm run lint && npm run build"
   },
   "keywords": ["homebridge-plugin", "coway", "airmega", "iocare", "air-purifier"],
@@ -124,7 +123,6 @@ Implementation rules:
     "eslint": "^8.57.0",
     "homebridge": "^1.8.0",
     "nodemon": "^3.1.0",
-    "rimraf": "^5.0.5",
     "typescript": "^5.4.0"
   }
 }
@@ -641,24 +639,36 @@ export class AirPurifierAccessory {
 
 ## Development workflow (Mac dev → Pi test)
 
-If you can't run Claude Code on the same machine as Homebridge (typical: Pi running Homebridge, Mac running Claude Code), you don't need rsync. Push to GitHub and install on the Pi from the GitHub URL:
+If you can't run Claude Code on the same machine as Homebridge (typical: Pi running Homebridge, Mac running Claude Code), you don't need rsync. Push to GitHub and install on the Pi from the GitHub URL.
 
-1. Develop and commit on the Mac. Push to GitHub.
-2. On the Pi, open the Homebridge UI → top-right three-dots menu → **Terminal**.
-3. Install (or reinstall to update):
-   ```
-   sudo npm install -g --unsafe-perm git+https://github.com/YOUR_USERNAME/homebridge-airmega-iocare.git
-   ```
-4. Restart Homebridge from the UI.
+**Before each push that touches `src/`:** run `npm run build` on the Mac to regenerate `dist/`, then commit both. We ship the compiled JavaScript in the repo (see "Why we commit `dist/`" below).
 
-The `prepare` script in `package.json` builds the TypeScript at install time on the Pi, so you don't need to commit `dist/`. Add `dist/` to `.gitignore`.
+1. Develop on the Mac. Run `npm run build` and `npm run lint` until clean.
+2. Commit `src/` and `dist/` together. Push to GitHub.
+3. On the Pi, open the Homebridge UI → top-right three-dots menu → **Terminal**.
+4. Install (or reinstall to update):
+   ```
+   sudo env "PATH=/opt/homebridge/bin:$PATH" npm install -g --unsafe-perm git+https://github.com/YOUR_USERNAME/homebridge-airmega-iocare.git
+   ```
+   The `sudo env "PATH=..."` prefix is required on the official Homebridge Raspberry Pi image because Node lives in `/opt/homebridge/bin/` and `sudo` doesn't inherit that from your shell. Without it, npm errors out with `command not found` or npm finds itself but its shebang can't find node.
+5. Restart Homebridge from the UI.
 
 To pin to a specific branch (e.g. a `dev` branch for testing):
 ```
-sudo npm install -g --unsafe-perm git+https://github.com/YOUR_USERNAME/homebridge-airmega-iocare.git#dev
+sudo env "PATH=/opt/homebridge/bin:$PATH" npm install -g --unsafe-perm git+https://github.com/YOUR_USERNAME/homebridge-airmega-iocare.git#dev
 ```
 
 Once the plugin is stable, publish to npm and switch to the UI's built-in update button — but for the initial development loop, the GitHub-install route is the right path.
+
+### Why we commit `dist/`
+
+Earlier drafts of this doc said the `prepare` script in `package.json` would compile TypeScript on the Pi at install time, so committing `dist/` was unnecessary. That didn't survive contact with reality — npm 11.x's git-install path runs the `prepare` hook before `devDependencies` are reliably available, so first `rimraf` then `tsc` came up `command not found` and the install aborted. Trying to keep that chain healthy across npm versions is a losing battle.
+
+We instead:
+- **Removed the `prepare` script** from `package.json`. Local dev still uses `npm run build` directly. `prepublishOnly` still builds before any future `npm publish`.
+- **Removed `dist` from `.gitignore`** and committed the compiled output. The Pi install becomes a clone + symlink, no compile step, ~10 seconds.
+
+Cost: `dist/` and `src/` can drift if someone forgets `npm run build` before committing. Mitigations: a pre-commit hook or a CI check would catch this; for now it's a discipline thing — `npm run build` is part of the commit workflow.
 
 ---
 
