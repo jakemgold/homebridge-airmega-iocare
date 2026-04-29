@@ -6,13 +6,13 @@
   "license": "MIT",
   "main": "dist/index.js",
   "engines": {
-    "node": "^18.20.4 || ^20.15.1 || ^22",
+    "node": ">=18.20.4",
     "homebridge": "^1.8.0 || ^2.0.0-beta.0"
   },
   "scripts": {
     "lint": "eslint src/**/*.ts",
     "watch": "npm run build && npm link && nodemon",
-    "build": "rimraf ./dist && tsc",
+    "build": "rm -rf ./dist && tsc",
     "prepare": "npm run build",
     "prepublishOnly": "npm run lint && npm run build"
   },
@@ -27,7 +27,6 @@
     "eslint": "^8.57.0",
     "homebridge": "^1.8.0",
     "nodemon": "^3.1.0",
-    "rimraf": "^5.0.5",
     "typescript": "^5.4.0"
   }
 }
