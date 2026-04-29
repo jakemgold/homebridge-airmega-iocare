@@ -9,6 +9,9 @@
 </p>
 
 <p align="center">
+  <a href="https://www.npmjs.com/package/homebridge-airmega-iocare">
+    <img alt="npm" src="https://img.shields.io/npm/v/homebridge-airmega-iocare/beta.svg?label=npm%20%40beta&color=orange">
+  </a>
   <a href="LICENSE">
     <img alt="License" src="https://img.shields.io/badge/license-MIT-blue.svg">
   </a>
@@ -59,20 +62,33 @@ If you have one of the untested models, please open an issue with the result.
 
 ## Installation
 
+> **Status: beta.** The plugin works end-to-end on a verified Airmega 400S but has only run in production on one account. Bug reports welcome — see [Reporting issues](#reporting-issues) below.
+
 ### Recommended: Homebridge UI
 
-1. Open the Homebridge UI, go to **Plugins**.
-2. Search for **`homebridge-airmega-iocare`** (visible once published to npm).
-3. Click **Install**.
-4. When the install finishes, click **Settings** on the plugin tile and fill in:
+1. Open the Homebridge UI and go to **Plugins**.
+2. Search for **`homebridge-airmega-iocare`** and click **Install**.
+3. When the install finishes, click **Settings** on the plugin tile and fill in:
    - **Username** — your IoCare+ login (email or phone number)
    - **Password** — your IoCare+ password
    - Leave the rest at defaults unless you have a reason to change them.
-5. Save and restart Homebridge.
+4. Save and restart Homebridge.
 
-### Alternative: install from GitHub
+### Via npm
 
-For pre-release versions or pinning to a specific branch, install via the Homebridge UI's **Terminal**:
+```sh
+npm install -g homebridge-airmega-iocare
+```
+
+Or pin to the beta tag explicitly:
+
+```sh
+npm install -g homebridge-airmega-iocare@beta
+```
+
+### Alternative: install from GitHub (latest unreleased commits)
+
+For pre-release fixes that haven't yet been published to npm, install via the Homebridge UI's **Terminal**:
 
 ```sh
 sudo env "PATH=/opt/homebridge/bin:$PATH" npm install --prefix /var/lib/homebridge git+https://github.com/jakemgold/homebridge-airmega-iocare.git
