@@ -625,7 +625,9 @@ function modeFromRegister(value: unknown): DeviceState['mode'] {
 
 function aqLevelFromGrade(grade: unknown): DeviceState['airQuality'] {
   if (grade === 1 || grade === 2 || grade === 3 || grade === 4) return grade;
-  return 1;
+  // 0 = HomeKit "Unknown". Don't default to 1 (Excellent) on missing data —
+  // that lies about state in exactly the way the filter-default fix avoids.
+  return 0;
 }
 
 function clampFanSpeed(v: unknown): DeviceState['fanSpeed'] {

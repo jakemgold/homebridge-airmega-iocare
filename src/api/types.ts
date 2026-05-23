@@ -8,8 +8,11 @@ export interface CowayDevice {
   serial?: string;
 }
 
-// Good / Moderate / Unhealthy / Very Unhealthy
-export type AirQualityLevel = 1 | 2 | 3 | 4;
+// HomeKit AirQuality characteristic values:
+//   0 = Unknown, 1 = Excellent, 2 = Good, 3 = Fair, 4 = Inferior, 5 = Poor.
+// Coway only emits the 1–4 range; we use 0 (Unknown) when the underlying
+// grade is missing so we don't lie about state by defaulting to Excellent.
+export type AirQualityLevel = 0 | 1 | 2 | 3 | 4;
 
 // Coway's actual mode register values; the accessory layer maps these to the
 // HomeKit-side concepts (Sleep/Eco/Smart preset switches + Auto/Manual target).
