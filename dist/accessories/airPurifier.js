@@ -25,6 +25,7 @@ class AirPurifierAccessory {
     accessory;
     pollingInterval;
     device;
+    pmCaps;
     purifier;
     airQuality;
     preFilter;
@@ -42,6 +43,12 @@ class AirPurifierAccessory {
         this.accessory = accessory;
         this.pollingInterval = pollingInterval;
         this.device = accessory.context.device;
+        this.pmCaps = deviceCodes_1.PM_CAPABILITIES[this.device.productModel] ?? deviceCodes_1.PM_CAPABILITIES_UNKNOWN;
+        if (!deviceCodes_1.PM_CAPABILITIES[this.device.productModel]) {
+            platform.log.warn(`${this.device.name}: unknown productModel "${this.device.productModel}"; ` +
+                `not exposing PM2.5/PM10 to HomeKit. Please file an issue with this productModel string ` +
+                `so a capability row can be added.`);
+        }
         this.fanSpeedDebouncer = new Debouncer(SETTER_DEBOUNCE_MS, async (speed) => {
             try {
                 await this.platform.client.sendCommand(this.device, deviceCodes_1.Attribute.FAN_SPEED, String(speed));
@@ -81,6 +88,14 @@ class AirPurifierAccessory {
         this.setServiceName(this.airQuality, 'Air Quality');
         this.airQuality.getCharacteristic(C.AirQuality)
             .onGet(() => this.state?.airQuality ?? 0);
+        // Per-model PM gating. The AirQualitySensor service template includes
+        // PM2_5Density and PM10Density as optional characteristics — once we've
+        // ever called updateCharacteristic on them, they stick on the cached
+        // accessory and render in HomeKit at their default of 0 even if we stop
+        // pushing. Explicit removal cleans up accessories that were registered
+        // before this gating existed.
+        this.applyPmCharacteristic(C.PM2_5Density, this.pmCaps.pm25);
+        this.applyPmCharacteristic(C.PM10Density, this.pmCaps.pm10);
         this.preFilter = accessory.getServiceById(S.FilterMaintenance, 'pre')
             ?? accessory.addService(S.FilterMaintenance, 'Pre-filter', 'pre');
         this.setServiceName(this.preFilter, 'Pre-filter');
@@ -219,10 +234,13 @@ class AirPurifierAccessory {
         this.purifier.updateCharacteristic(C.TargetAirPurifierState, this.state.mode === 'auto' ? 1 : 0);
         this.purifier.updateCharacteristic(C.RotationSpeed, this.fanSpeedToHomeKit(this.state.fanSpeed));
         this.airQuality.updateCharacteristic(C.AirQuality, this.state.airQuality);
-        if (this.state.pm25 !== undefined) {
+        // PM updates are gated by the per-model capability table. Models that
+        // don't actually report PM2.5 (e.g. the 400S) populate PM25_IDX with 0,
+        // which would otherwise look like "very clean air" in HomeKit forever.
+        if (this.pmCaps.pm25 && this.state.pm25 !== undefined) {
             this.airQuality.updateCharacteristic(C.PM2_5Density, this.state.pm25);
         }
-        if (this.state.pm10 !== undefined) {
+        if (this.pmCaps.pm10 && this.state.pm10 !== undefined) {
             this.airQuality.updateCharacteristic(C.PM10Density, this.state.pm10);
         }
         // Only push filter values when Coway returned them. Skipping the update
@@ -284,6 +302,21 @@ class AirPurifierAccessory {
         svc.setCharacteristic(C.Name, name);
         svc.addOptionalCharacteristic(C.ConfiguredName);
         svc.setCharacteristic(C.ConfiguredName, name);
+    }
+    /**
+     * Add or remove an optional characteristic on the AirQualitySensor service
+     * based on whether the model supports it. Called once during construction
+     * so cached accessories that were registered before per-model gating shed
+     * stale PM2.5/PM10 characteristics rather than showing a fake 0.
+     */
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    applyPmCharacteristic(ctor, supported) {
+        if (supported) {
+            this.airQuality.getCharacteristic(ctor);
+        }
+        else if (this.airQuality.testCharacteristic(ctor)) {
+            this.airQuality.removeCharacteristic(this.airQuality.getCharacteristic(ctor));
+        }
     }
     fanSpeedToHomeKit(s) {
         return Math.round((s / 3) * 100);
