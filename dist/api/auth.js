@@ -9,6 +9,7 @@ exports.refreshAccessToken = refreshAccessToken;
 const axios_1 = __importDefault(require("axios"));
 const url_1 = require("url");
 const endpoints_1 = require("./endpoints");
+const redact_1 = require("./redact");
 // cowayaio reports the access token lifetime is 1 hour; we mirror that and
 // refresh proactively when the expiration is within 5 minutes.
 const ACCESS_TOKEN_TTL_MS = 60 * 60 * 1000;
@@ -45,11 +46,14 @@ exports.RateLimitedError = RateLimitedError;
  */
 async function performLogin(params) {
     const { username, log } = params;
-    log.debug(`Coway: starting login for ${username}`);
+    // Mask the local part of the username in debug logs so a shared bug-report
+    // log doesn't leak the full account email/phone.
+    const maskedUser = (0, redact_1.maskEmail)(username);
+    log.debug(`Coway: starting login for ${maskedUser}`);
     const { loginActionUrl, cookies } = await fetchLoginPage();
     const authCode = await submitCredentials(loginActionUrl, cookies, params);
     const tokens = await exchangeCodeForTokens(authCode);
-    log.debug(`Coway: login complete for ${username}`);
+    log.debug(`Coway: login complete for ${maskedUser}`);
     return tokens;
 }
 async function refreshAccessToken(refreshToken) {
@@ -66,6 +70,16 @@ async function refreshAccessToken(refreshToken) {
         maxBodyLength: MAX_RESPONSE_BYTES,
         validateStatus: () => true,
     });
+    // Status-based mapping comes first. Without this, a 429 or 5xx falls through
+    // to "no tokens in body" → AuthError → full username+password re-login in
+    // forceRefresh, which hammers Coway exactly when it's already unhappy.
+    // A plain Error here lets the calling poll cycle log and try again next tick.
+    if (resp.status === 429) {
+        throw new RateLimitedError(`Coway rate-limited on token refresh: HTTP 429. Wait at least an hour before retrying.`);
+    }
+    if (resp.status >= 500) {
+        throw new Error(`Coway server error on token refresh: HTTP ${resp.status}`);
+    }
     const body = resp.data;
     if (body?.error?.message === endpoints_1.ErrorMessage.INVALID_REFRESH_TOKEN) {
         throw new AuthError('Coway refresh token is no longer valid; need to re-login.');
@@ -73,7 +87,7 @@ async function refreshAccessToken(refreshToken) {
     const accessToken = body?.data?.accessToken;
     const newRefresh = body?.data?.refreshToken;
     if (!accessToken || !newRefresh) {
-        throw new AuthError(`Coway token refresh failed: ${JSON.stringify(body)}`);
+        throw new AuthError(`Coway token refresh failed: ${(0, redact_1.redactBody)(body)}`);
     }
     return {
         accessToken,
@@ -220,12 +234,12 @@ async function exchangeCodeForTokens(authCode) {
             'contact Coway support.');
     }
     if (body?.error) {
-        throw new AuthError(`Coway token exchange failed: ${body.error.message ?? JSON.stringify(body.error)}`);
+        throw new AuthError(`Coway token exchange failed: ${body.error.message ?? (0, redact_1.redactBody)(body.error)}`);
     }
     const accessToken = body?.data?.accessToken;
     const refreshToken = body?.data?.refreshToken;
     if (!accessToken || !refreshToken) {
-        throw new AuthError(`Coway token exchange returned no tokens: ${JSON.stringify(body)}`);
+        throw new AuthError(`Coway token exchange returned no tokens: ${(0, redact_1.redactBody)(body)}`);
     }
     return {
         accessToken,
