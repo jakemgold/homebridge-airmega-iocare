@@ -76,3 +76,51 @@ export const PM_CAPABILITIES: Record<string, PmCapabilities> = {
 // PM-related, since pushing fake densities is worse than pushing nothing
 // (HomeKit still gets the AirQuality grade, which is universal).
 export const PM_CAPABILITIES_UNKNOWN: PmCapabilities = { pm10: false, pm25: false };
+
+/**
+ * Per-model user-selectable preset availability.
+ *
+ * Coway exposes more mode register values (0x0002) than any single model
+ * actually lets the user set:
+ *   1 = Smart (Auto)        — every model
+ *   2 = Sleep / Night       — 400S, 300S, 250S, IconS
+ *   5 = Rapid               — 250S only (cowayaio: async_set_rapid_mode docstring)
+ *   6 = Smart-Eco           — MightyS only as a user preset
+ *                             (firmware-driven Auto sub-state on others)
+ *
+ * Sources triangulated for these rows:
+ *   - cowayaio's `async_set_eco_mode` / `async_set_rapid_mode` docstrings
+ *     explicitly say which models each command targets.
+ *   - home-assistant-iocare's `fan.py:108-122` per-model preset_modes branch.
+ *   - Coway's official 400S user manual: Eco and Sleep within Smart Mode
+ *     activate AUTOMATICALLY (firmware-driven sub-states), not via buttons.
+ *     The user can pick Sleep separately from Manual Mode (= our mode=2).
+ *
+ * Verified entries are confirmed by live probe / direct ownership. The
+ * 400S row is verified; the others mirror the references above.
+ *
+ * MightyS doesn't get a Sleep preset because Eco is its quiet mode — the
+ * model doesn't expose Night separately, per HA's `PRESET_MODES_AP`.
+ */
+export interface PresetCapabilities {
+  sleep: boolean;  // mode=2 user-settable
+  eco: boolean;    // mode=6 user-settable (vs. firmware-driven Auto sub-state)
+  smart: boolean;  // mode=5 (Rapid) user-settable
+}
+
+export const PRESET_CAPABILITIES: Record<string, PresetCapabilities> = {
+  // Verified
+  'AP-2015E':   { sleep: true,  eco: false, smart: false }, // Airmega 400S
+  // Unverified — per cowayaio docstrings + HA's per-model gating
+  'AP-1521E':   { sleep: true,  eco: false, smart: false }, // Airmega 300S
+  'AP-1512HHS': { sleep: false, eco: true,  smart: false }, // Airmega MightyS
+  'AP-1719A':   { sleep: true,  eco: false, smart: true  }, // Airmega 250S
+  'AP-1722B':   { sleep: true,  eco: false, smart: false }, // Airmega IconS
+};
+
+// Conservative default for an unrecognized productModel: expose only Sleep
+// (the most widely supported preset). Better to under-expose than to register
+// a non-functional switch that the user can press to no effect.
+export const PRESET_CAPABILITIES_UNKNOWN: PresetCapabilities = {
+  sleep: true, eco: false, smart: false,
+};

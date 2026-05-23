@@ -26,6 +26,7 @@ class AirPurifierAccessory {
     pollingInterval;
     device;
     pmCaps;
+    presetCaps;
     purifier;
     airQuality;
     preFilter;
@@ -44,10 +45,14 @@ class AirPurifierAccessory {
         this.pollingInterval = pollingInterval;
         this.device = accessory.context.device;
         this.pmCaps = deviceCodes_1.PM_CAPABILITIES[this.device.productModel] ?? deviceCodes_1.PM_CAPABILITIES_UNKNOWN;
-        if (!deviceCodes_1.PM_CAPABILITIES[this.device.productModel]) {
+        this.presetCaps = deviceCodes_1.PRESET_CAPABILITIES[this.device.productModel] ?? deviceCodes_1.PRESET_CAPABILITIES_UNKNOWN;
+        // PM_CAPABILITIES and PRESET_CAPABILITIES are populated from the same
+        // model set, so a miss in either means the model is unrecognized — one
+        // warn covers the consequences for both capability tables.
+        if (!deviceCodes_1.PM_CAPABILITIES[this.device.productModel] || !deviceCodes_1.PRESET_CAPABILITIES[this.device.productModel]) {
             platform.log.warn(`${this.device.name}: unknown productModel "${this.device.productModel}"; ` +
-                `not exposing PM2.5/PM10 to HomeKit. Please file an issue with this productModel string ` +
-                `so a capability row can be added.`);
+                `not exposing PM2.5/PM10 to HomeKit and registering only the Sleep preset. ` +
+                `Please file an issue with this productModel string so a capability row can be added.`);
         }
         this.fanSpeedDebouncer = new Debouncer(SETTER_DEBOUNCE_MS, async (speed) => {
             try {
@@ -77,7 +82,7 @@ class AirPurifierAccessory {
         this.purifier.getCharacteristic(C.CurrentAirPurifierState)
             .onGet(() => this.state?.power ? 2 : 0); // 2 = purifying, 0 = inactive
         this.purifier.getCharacteristic(C.TargetAirPurifierState)
-            .onGet(() => this.state?.mode === 'auto' ? 1 : 0)
+            .onGet(() => this.isAutoForUser(this.state?.mode) ? 1 : 0)
             .onSet(v => this.handleTargetStateSet(v));
         this.purifier.getCharacteristic(C.RotationSpeed)
             .setProps({ minStep: 100 / 3 })
@@ -103,6 +108,16 @@ class AirPurifierAccessory {
             ?? accessory.addService(S.FilterMaintenance, 'Max2 Filter', 'max2');
         this.setServiceName(this.max2Filter, 'Max2 Filter');
         for (const preset of PRESETS) {
+            if (!this.presetCaps[preset.key]) {
+                // Remove stale switch from accessories registered before per-model
+                // gating existed — without this they'd persist in Apple Home as a
+                // tile the user can press to no effect (or, post-PR #1's status
+                // validation, a tile that returns a Coway error every time).
+                const stale = accessory.getServiceById(S.Switch, preset.subtype);
+                if (stale)
+                    accessory.removeService(stale);
+                continue;
+            }
             const svc = accessory.getServiceById(S.Switch, preset.subtype)
                 ?? accessory.addService(S.Switch, preset.display, preset.subtype);
             this.setServiceName(svc, preset.display);
@@ -231,7 +246,7 @@ class AirPurifierAccessory {
         const C = this.platform.Characteristic;
         this.purifier.updateCharacteristic(C.Active, this.state.power ? 1 : 0);
         this.purifier.updateCharacteristic(C.CurrentAirPurifierState, this.state.power ? 2 : 0);
-        this.purifier.updateCharacteristic(C.TargetAirPurifierState, this.state.mode === 'auto' ? 1 : 0);
+        this.purifier.updateCharacteristic(C.TargetAirPurifierState, this.isAutoForUser(this.state.mode) ? 1 : 0);
         this.purifier.updateCharacteristic(C.RotationSpeed, this.fanSpeedToHomeKit(this.state.fanSpeed));
         this.airQuality.updateCharacteristic(C.AirQuality, this.state.airQuality);
         // PM updates are gated by the per-model capability table. Models that
@@ -317,6 +332,23 @@ class AirPurifierAccessory {
         else if (this.airQuality.testCharacteristic(ctor)) {
             this.airQuality.removeCharacteristic(this.airQuality.getCharacteristic(ctor));
         }
+    }
+    /**
+     * Decide whether the device's current mode should read as "Auto" to the
+     * HomeKit user. mode='auto' (register=1) is obviously Auto. mode='eco'
+     * (register=6) is a firmware-driven sub-state of Smart Mode on every
+     * model except the MightyS, so for those models the user is still
+     * conceptually in Auto when the firmware enters Eco on its own. On the
+     * MightyS, Eco is an explicit user preset and should read as Manual
+     * with the Eco preset switch active — matching how Apple Home surfaces
+     * any other user-selected preset.
+     */
+    isAutoForUser(mode) {
+        if (mode === 'auto')
+            return true;
+        if (mode === 'eco' && !this.presetCaps.eco)
+            return true;
+        return false;
     }
     fanSpeedToHomeKit(s) {
         return Math.round((s / 3) * 100);
