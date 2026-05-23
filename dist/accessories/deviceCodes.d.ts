@@ -18,3 +18,26 @@ export declare const LightMode: {
     readonly ON: "2";
 };
 export declare const PREFILTER_CYCLE: Record<number, string>;
+/**
+ * Per-model PM sensor availability for the Airmega family.
+ *
+ * The IoCare+ API exposes PM2.5 and PM10 differently depending on the model.
+ * Some models report only PM10 (the AIRMEGA family), others only PM2.5 (IconS),
+ * and one model (250S) reports both. Mapping is sourced from the
+ * home-assistant-iocare README and `sensor.py` gating, plus a live API probe
+ * against a 400S that confirmed the 400S row.
+ *
+ * Verified live: AP-2015E (400S). The 400S response has no `'0001'` sensor key
+ * at all; `PM25_IDX` is present but always 0 — i.e. it's a placeholder, not a
+ * real reading. PM10 lives at `'0002'` and reflects the device's actual sensor.
+ *
+ * Unverified rows come from HA's documentation. If your purifier is listed
+ * here but the productModel string doesn't match what Coway returns for it,
+ * please open an issue with the actual `productModel` value from your logs.
+ */
+export interface PmCapabilities {
+    pm10: boolean;
+    pm25: boolean;
+}
+export declare const PM_CAPABILITIES: Record<string, PmCapabilities>;
+export declare const PM_CAPABILITIES_UNKNOWN: PmCapabilities;

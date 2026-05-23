@@ -5,6 +5,7 @@ export declare class AirPurifierAccessory {
     private readonly accessory;
     private readonly pollingInterval;
     private readonly device;
+    private readonly pmCaps;
     private readonly purifier;
     private readonly airQuality;
     private readonly preFilter;
@@ -50,6 +51,13 @@ export declare class AirPurifierAccessory {
      * pattern for adding non-canonical characteristics.
      */
     private setServiceName;
+    /**
+     * Add or remove an optional characteristic on the AirQualitySensor service
+     * based on whether the model supports it. Called once during construction
+     * so cached accessories that were registered before per-model gating shed
+     * stale PM2.5/PM10 characteristics rather than showing a fake 0.
+     */
+    private applyPmCharacteristic;
     private fanSpeedToHomeKit;
     private homeKitToFanSpeed;
 }

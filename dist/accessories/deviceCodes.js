@@ -7,7 +7,7 @@
 // accepts {attributes: {<key>: <value>}, ...}. Values are strings (some endpoints
 // accept raw ints — check while porting).
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.PREFILTER_CYCLE = exports.LightMode = exports.ModeValue = exports.Attribute = void 0;
+exports.PM_CAPABILITIES_UNKNOWN = exports.PM_CAPABILITIES = exports.PREFILTER_CYCLE = exports.LightMode = exports.ModeValue = exports.Attribute = void 0;
 exports.Attribute = {
     POWER: '0001', // '1' on, '0' off
     MODE: '0002', // 1=auto, 2=night/sleep, 5=rapid (250s), 6=eco
@@ -38,4 +38,17 @@ exports.PREFILTER_CYCLE = {
     3: '2',
     4: '3',
 };
+exports.PM_CAPABILITIES = {
+    // Verified
+    'AP-2015E': { pm10: true, pm25: false }, // Airmega 400S
+    // Unverified — sourced from HA's documented per-model availability
+    'AP-1521E': { pm10: true, pm25: false }, // Airmega 300S
+    'AP-1512HHS': { pm10: true, pm25: false }, // Airmega MightyS
+    'AP-1719A': { pm10: true, pm25: true }, // Airmega 250S
+    'AP-1722B': { pm10: false, pm25: true }, // Airmega IconS
+};
+// Conservative default for an unrecognized productModel: expose nothing
+// PM-related, since pushing fake densities is worse than pushing nothing
+// (HomeKit still gets the AirQuality grade, which is universal).
+exports.PM_CAPABILITIES_UNKNOWN = { pm10: false, pm25: false };
 //# sourceMappingURL=deviceCodes.js.map
