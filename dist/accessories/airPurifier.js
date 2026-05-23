@@ -36,6 +36,7 @@ class AirPurifierAccessory {
     fanSpeedDebouncer;
     state;
     pollHandle;
+    refreshing = false;
     constructor(platform, accessory, pollingInterval) {
         this.platform = platform;
         this.accessory = accessory;
@@ -193,8 +194,21 @@ class AirPurifierAccessory {
         }, this.pollingInterval);
     }
     async refresh() {
-        this.state = await this.platform.client.getDeviceState(this.device);
-        this.pushUpdates();
+        // Guard against overlapping polls: a slow Coway response (3 round-trips,
+        // up to ~75s with worst-case retries) can outlast the polling interval,
+        // and unguarded setInterval would queue successors on top.
+        if (this.refreshing) {
+            this.platform.log.debug(`${this.device.name}: skipping poll, prior refresh still in flight`);
+            return;
+        }
+        this.refreshing = true;
+        try {
+            this.state = await this.platform.client.getDeviceState(this.device);
+            this.pushUpdates();
+        }
+        finally {
+            this.refreshing = false;
+        }
     }
     pushUpdates() {
         if (!this.state)
@@ -211,10 +225,17 @@ class AirPurifierAccessory {
         if (this.state.pm10 !== undefined) {
             this.airQuality.updateCharacteristic(C.PM10Density, this.state.pm10);
         }
-        this.preFilter.updateCharacteristic(C.FilterLifeLevel, this.state.preFilterPct);
-        this.preFilter.updateCharacteristic(C.FilterChangeIndication, this.state.preFilterPct < 10 ? 1 : 0);
-        this.max2Filter.updateCharacteristic(C.FilterLifeLevel, this.state.max2FilterPct);
-        this.max2Filter.updateCharacteristic(C.FilterChangeIndication, this.state.max2FilterPct < 10 ? 1 : 0);
+        // Only push filter values when Coway returned them. Skipping the update
+        // leaves HomeKit's last known value in place, which is safer than
+        // synthesizing a healthy 100% on missing data.
+        if (this.state.preFilterPct !== undefined) {
+            this.preFilter.updateCharacteristic(C.FilterLifeLevel, this.state.preFilterPct);
+            this.preFilter.updateCharacteristic(C.FilterChangeIndication, this.state.preFilterPct < 10 ? 1 : 0);
+        }
+        if (this.state.max2FilterPct !== undefined) {
+            this.max2Filter.updateCharacteristic(C.FilterLifeLevel, this.state.max2FilterPct);
+            this.max2Filter.updateCharacteristic(C.FilterChangeIndication, this.state.max2FilterPct < 10 ? 1 : 0);
+        }
         for (const preset of PRESETS) {
             const svc = this.presetServices.get(preset.key);
             svc?.updateCharacteristic(C.On, this.state.mode === preset.apiMode);

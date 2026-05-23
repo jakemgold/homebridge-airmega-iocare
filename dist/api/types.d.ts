@@ -7,7 +7,7 @@ export interface CowayDevice {
     placeId: string | number;
     serial?: string;
 }
-export type AirQualityLevel = 1 | 2 | 3 | 4;
+export type AirQualityLevel = 0 | 1 | 2 | 3 | 4;
 export type DeviceMode = 'auto' | 'manual' | 'night' | 'eco' | 'rapid';
 export interface DeviceState {
     power: boolean;
@@ -17,8 +17,8 @@ export interface DeviceState {
     airQuality: AirQualityLevel;
     pm25?: number;
     pm10?: number;
-    preFilterPct: number;
-    max2FilterPct: number;
+    preFilterPct?: number;
+    max2FilterPct?: number;
     timerMinutesRemaining?: number;
     mcuVersion?: string;
 }
