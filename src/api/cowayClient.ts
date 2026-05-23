@@ -8,6 +8,7 @@ import {
   CATEGORY_NAME, Endpoint, ErrorMessage, Header, Parameter,
 } from './endpoints';
 import { CowayDevice, DeviceState } from './types';
+import { redactBody } from './redact';
 
 export interface CowayClientOptions {
   username: string;
@@ -271,7 +272,7 @@ export class CowayClient {
     const body = await this.authedJsonGet(url);
     const code = body?.data?.memberInfo?.countryCode;
     if (!code || typeof code !== 'string') {
-      throw new Error(`Coway /com/my-info returned no countryCode (body=${JSON.stringify(body)})`);
+      throw new Error(`Coway /com/my-info returned no countryCode (body=${redactBody(body)})`);
     }
     return code;
   }
@@ -287,7 +288,7 @@ export class CowayClient {
     });
     const places = body?.data?.content;
     if (!Array.isArray(places)) {
-      throw new Error(`Coway /com/places returned no content (body=${JSON.stringify(body)})`);
+      throw new Error(`Coway /com/places returned no content (body=${redactBody(body)})`);
     }
     return places as CowayPlaceRow[];
   }
@@ -387,7 +388,7 @@ export class CowayClient {
       throw new Error(`Coway returned non-JSON for ${url}`);
     }
     if (body.error) {
-      const message = body.error?.message ?? JSON.stringify(body.error);
+      const message = body.error?.message ?? redactBody(body.error);
       if (message === ErrorMessage.INVALID_REFRESH_TOKEN || message === ErrorMessage.BAD_TOKEN) {
         throw new AuthError(`Coway auth error on ${url}: ${message}`);
       }

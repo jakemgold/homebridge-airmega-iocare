@@ -7,6 +7,7 @@ exports.CowayClient = void 0;
 const axios_1 = __importDefault(require("axios"));
 const auth_1 = require("./auth");
 const endpoints_1 = require("./endpoints");
+const redact_1 = require("./redact");
 // Refresh proactively when the token has under 5 minutes of life left,
 // matching cowayaio's behavior.
 const REFRESH_LEAD_MS = 5 * 60 * 1000;
@@ -204,7 +205,7 @@ class CowayClient {
         const body = await this.authedJsonGet(url);
         const code = body?.data?.memberInfo?.countryCode;
         if (!code || typeof code !== 'string') {
-            throw new Error(`Coway /com/my-info returned no countryCode (body=${JSON.stringify(body)})`);
+            throw new Error(`Coway /com/my-info returned no countryCode (body=${(0, redact_1.redactBody)(body)})`);
         }
         return code;
     }
@@ -219,7 +220,7 @@ class CowayClient {
         });
         const places = body?.data?.content;
         if (!Array.isArray(places)) {
-            throw new Error(`Coway /com/places returned no content (body=${JSON.stringify(body)})`);
+            throw new Error(`Coway /com/places returned no content (body=${(0, redact_1.redactBody)(body)})`);
         }
         return places;
     }
@@ -311,7 +312,7 @@ class CowayClient {
             throw new Error(`Coway returned non-JSON for ${url}`);
         }
         if (body.error) {
-            const message = body.error?.message ?? JSON.stringify(body.error);
+            const message = body.error?.message ?? (0, redact_1.redactBody)(body.error);
             if (message === endpoints_1.ErrorMessage.INVALID_REFRESH_TOKEN || message === endpoints_1.ErrorMessage.BAD_TOKEN) {
                 throw new auth_1.AuthError(`Coway auth error on ${url}: ${message}`);
             }
