@@ -6,6 +6,7 @@ export declare class AirPurifierAccessory {
     private readonly pollingInterval;
     private readonly device;
     private readonly pmCaps;
+    private readonly presetCaps;
     private readonly purifier;
     private readonly airQuality;
     private readonly preFilter;
@@ -58,6 +59,17 @@ export declare class AirPurifierAccessory {
      * stale PM2.5/PM10 characteristics rather than showing a fake 0.
      */
     private applyPmCharacteristic;
+    /**
+     * Decide whether the device's current mode should read as "Auto" to the
+     * HomeKit user. mode='auto' (register=1) is obviously Auto. mode='eco'
+     * (register=6) is a firmware-driven sub-state of Smart Mode on every
+     * model except the MightyS, so for those models the user is still
+     * conceptually in Auto when the firmware enters Eco on its own. On the
+     * MightyS, Eco is an explicit user preset and should read as Manual
+     * with the Eco preset switch active — matching how Apple Home surfaces
+     * any other user-selected preset.
+     */
+    private isAutoForUser;
     private fanSpeedToHomeKit;
     private homeKitToFanSpeed;
 }

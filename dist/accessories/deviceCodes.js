@@ -7,7 +7,7 @@
 // accepts {attributes: {<key>: <value>}, ...}. Values are strings (some endpoints
 // accept raw ints — check while porting).
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.PM_CAPABILITIES_UNKNOWN = exports.PM_CAPABILITIES = exports.PREFILTER_CYCLE = exports.LightMode = exports.ModeValue = exports.Attribute = void 0;
+exports.PRESET_CAPABILITIES_UNKNOWN = exports.PRESET_CAPABILITIES = exports.PM_CAPABILITIES_UNKNOWN = exports.PM_CAPABILITIES = exports.PREFILTER_CYCLE = exports.LightMode = exports.ModeValue = exports.Attribute = void 0;
 exports.Attribute = {
     POWER: '0001', // '1' on, '0' off
     MODE: '0002', // 1=auto, 2=night/sleep, 5=rapid (250s), 6=eco
@@ -51,4 +51,19 @@ exports.PM_CAPABILITIES = {
 // PM-related, since pushing fake densities is worse than pushing nothing
 // (HomeKit still gets the AirQuality grade, which is universal).
 exports.PM_CAPABILITIES_UNKNOWN = { pm10: false, pm25: false };
+exports.PRESET_CAPABILITIES = {
+    // Verified
+    'AP-2015E': { sleep: true, eco: false, smart: false }, // Airmega 400S
+    // Unverified — per cowayaio docstrings + HA's per-model gating
+    'AP-1521E': { sleep: true, eco: false, smart: false }, // Airmega 300S
+    'AP-1512HHS': { sleep: false, eco: true, smart: false }, // Airmega MightyS
+    'AP-1719A': { sleep: true, eco: false, smart: true }, // Airmega 250S
+    'AP-1722B': { sleep: true, eco: false, smart: false }, // Airmega IconS
+};
+// Conservative default for an unrecognized productModel: expose only Sleep
+// (the most widely supported preset). Better to under-expose than to register
+// a non-functional switch that the user can press to no effect.
+exports.PRESET_CAPABILITIES_UNKNOWN = {
+    sleep: true, eco: false, smart: false,
+};
 //# sourceMappingURL=deviceCodes.js.map
