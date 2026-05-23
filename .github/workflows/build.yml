@@ -28,10 +28,10 @@ jobs:
       - name: Build the project
         run: npm run build
 
-      - name: List, audit, fix outdated dependencies and build again
-        run: |
-          npm list --outdated
-          npm audit || true  # ignore failures
-          npm audit fix || true
-          npm list --outdated
-          npm run build
+      # Non-mutating audit. We deliberately do not run `npm audit fix` in CI:
+      # it would change the lockfile out from under us, hide the diff from
+      # review, and let CI pass against an uncommitted dependency graph.
+      # High/critical fixes come in through Dependabot PRs that update the
+      # lockfile explicitly.
+      - name: Audit dependencies
+        run: npm audit --audit-level=high
