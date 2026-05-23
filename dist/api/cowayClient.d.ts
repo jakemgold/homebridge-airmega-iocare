@@ -44,6 +44,22 @@ export declare class CowayClient {
      * standard exponential-backoff retry loop.
      */
     private authedJsonGet;
+    /**
+     * POST a JSON body with the standard authorized headers. Mirrors
+     * `authedJsonGet`: token freshness check, exponential backoff on 5xx/429,
+     * one-shot 401 retry after refresh, and HTTP-status-to-exception mapping.
+     * Returns the parsed body if it's a JSON object, or undefined if the
+     * endpoint responded with no body (control-status sometimes does). Control
+     * writes are idempotent at the value level (setting fan_speed=2 twice is a
+     * no-op), so retrying is safe.
+     */
+    private authedJsonPost;
+    /**
+     * Map HTTP status codes to thrown exceptions. Status-based mapping comes
+     * before any body parsing so we don't depend on matching Coway's localized
+     * message strings to recognize a 401 or 429.
+     */
+    private assertResponseOk;
     private parseJsonResponse;
     private authHeaders;
     private ensureFreshToken;

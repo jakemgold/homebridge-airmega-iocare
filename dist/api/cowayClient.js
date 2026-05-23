@@ -81,6 +81,13 @@ class CowayClient {
             this.fetchPurifierJson(device),
             this.fetchSupplies(device),
         ]);
+        // If we couldn't extract anything from the HTML, fail the poll instead of
+        // assembling state from empty objects. The caller catches and HomeKit
+        // keeps the last known value, which is much safer than reporting healthy
+        // defaults (e.g. "Pre-Filter 100%") that would mislead the user.
+        if (!purifierJson) {
+            throw new Error(`Coway: could not extract purifier state from HTML for ${device.name}`);
+        }
         const purifierInfo = findFirstObject(purifierJson?.children) ?? {};
         const status = readPath(purifierInfo, 'deviceStatusData.data.statusInfo.attributes') ?? {};
         const sensors = findSensorAttributes(purifierInfo);
@@ -97,26 +104,21 @@ class CowayClient {
         if (!this.tokens) {
             throw new Error('CowayClient.sendCommand() called before login()');
         }
-        await this.ensureFreshToken();
         const url = `${endpoints_1.Endpoint.BASE_URI}${endpoints_1.Endpoint.PLACES}/${device.placeId}/devices/${device.deviceId}/control-status`;
         const payload = {
             attributes: { [attribute]: String(value) },
             isMultiControl: false,
             refreshFlag: false,
         };
-        const resp = await axios_1.default.post(url, payload, {
-            headers: this.authHeaders(),
-            timeout: 15000,
-            maxContentLength: MAX_RESPONSE_BYTES,
-            maxBodyLength: MAX_RESPONSE_BYTES,
-            validateStatus: () => true,
-        });
-        const body = resp.data;
+        const body = await this.authedJsonPost(url, payload);
+        // control-status uses a `header.error_code` envelope for app-level failures
+        // (e.g. device offline). HTTP-level failures are already mapped to thrown
+        // errors inside authedJsonPost.
         if (body && typeof body === 'object' && body.header?.error_code) {
             throw new Error(`Coway command failed (${attribute}=${value}): ` +
                 `${body.header.error_code} ${body.header.error_text ?? ''}`.trim());
         }
-        this.opts.log.debug(`Coway: ${device.name} command sent (${attribute}=${value}); status=${resp.status}`);
+        this.opts.log.debug(`Coway: ${device.name} command sent (${attribute}=${value})`);
     }
     // --- internals ---
     async fetchPurifierJson(device) {
@@ -254,10 +256,40 @@ class CowayClient {
         }
         return this.parseJsonResponse(resp, url);
     }
+    /**
+     * POST a JSON body with the standard authorized headers. Mirrors
+     * `authedJsonGet`: token freshness check, exponential backoff on 5xx/429,
+     * one-shot 401 retry after refresh, and HTTP-status-to-exception mapping.
+     * Returns the parsed body if it's a JSON object, or undefined if the
+     * endpoint responded with no body (control-status sometimes does). Control
+     * writes are idempotent at the value level (setting fan_speed=2 twice is a
+     * no-op), so retrying is safe.
+     */
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    parseJsonResponse(resp, url) {
-        // Status-code-based error mapping comes first so we don't depend on
-        // matching Coway's localized message strings to recognize a 429 or 401.
+    async authedJsonPost(url, payload) {
+        await this.ensureFreshToken();
+        const buildCfg = () => ({
+            headers: this.authHeaders(),
+            timeout: 15000,
+            maxContentLength: MAX_RESPONSE_BYTES,
+            maxBodyLength: MAX_RESPONSE_BYTES,
+            validateStatus: () => true,
+        });
+        let resp = await withRetry(() => axios_1.default.post(url, payload, buildCfg()), this.opts.log, url);
+        if (resp.status === 401) {
+            await this.forceRefresh();
+            resp = await withRetry(() => axios_1.default.post(url, payload, buildCfg()), this.opts.log, url);
+        }
+        this.assertResponseOk(resp, url);
+        const body = resp.data;
+        return body && typeof body === 'object' ? body : undefined;
+    }
+    /**
+     * Map HTTP status codes to thrown exceptions. Status-based mapping comes
+     * before any body parsing so we don't depend on matching Coway's localized
+     * message strings to recognize a 401 or 429.
+     */
+    assertResponseOk(resp, url) {
         if (resp.status === 401) {
             throw new auth_1.AuthError(`Coway auth error on ${url}: HTTP 401`);
         }
@@ -267,6 +299,13 @@ class CowayClient {
         if (resp.status >= 500) {
             throw new Error(`Coway server error on ${url}: HTTP ${resp.status}`);
         }
+        if (resp.status < 200 || resp.status >= 300) {
+            throw new Error(`Coway unexpected status on ${url}: HTTP ${resp.status}`);
+        }
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    parseJsonResponse(resp, url) {
+        this.assertResponseOk(resp, url);
         const body = resp.data;
         if (!body || typeof body !== 'object') {
             throw new Error(`Coway returned non-JSON for ${url}`);
@@ -533,8 +572,8 @@ function assembleDeviceState(status, sensors, aqGrade, supplies, mcuVersion) {
         airQuality,
         pm25,
         pm10,
-        preFilterPct: preFilterPct ?? 100,
-        max2FilterPct: max2FilterPct ?? 100,
+        preFilterPct,
+        max2FilterPct,
         timerMinutesRemaining,
         mcuVersion,
     };

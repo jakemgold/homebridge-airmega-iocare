@@ -26,8 +26,12 @@ class AirmegaPlatform {
         this.Characteristic = api.hap.Characteristic;
         // Schema enforces minimum 30s but config.json is hand-edited too. Clamp in
         // code so a misconfigured 0 (or anything below 30) can't tight-loop the
-        // Coway API and rate-limit the account.
-        const pollSeconds = Math.max(30, config?.pollingInterval ?? settings_1.DEFAULT_POLL_SECONDS);
+        // Coway API and rate-limit the account. Coerce through Number so a
+        // hand-edited string like "abc" produces NaN, which we then replace with
+        // the default — otherwise NaN * 1000 = NaN, and setInterval(fn, NaN)
+        // coerces to ~1ms and hammers Coway.
+        const rawPoll = Number(config?.pollingInterval);
+        const pollSeconds = Number.isFinite(rawPoll) ? Math.max(30, rawPoll) : settings_1.DEFAULT_POLL_SECONDS;
         this.pollingInterval = pollSeconds * 1000;
         if (!config?.username || !config?.password) {
             this.log.error('Username and password are required.');

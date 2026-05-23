@@ -23,8 +23,13 @@ export interface DeviceState {
   airQuality: AirQualityLevel;
   pm25?: number;
   pm10?: number;
-  preFilterPct: number;   // 0–100
-  max2FilterPct: number;  // 0–100
+  // Filter percentages are undefined when Coway hasn't returned a value for
+  // them yet (the 250S /supplies endpoint is still under development, per
+  // cowayaio). The accessory layer treats undefined as "unknown" — it skips
+  // pushing the characteristic so HomeKit keeps its last known value rather
+  // than reading a synthesized 100%.
+  preFilterPct?: number;   // 0–100
+  max2FilterPct?: number;  // 0–100
   timerMinutesRemaining?: number;
   // Coway's MCU/firmware version string (e.g. '1.0.6'). Read from the same
   // HTML-scrape `coreData` block as sensors and status; included on every poll

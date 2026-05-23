@@ -17,8 +17,8 @@ export interface DeviceState {
     airQuality: AirQualityLevel;
     pm25?: number;
     pm10?: number;
-    preFilterPct: number;
-    max2FilterPct: number;
+    preFilterPct?: number;
+    max2FilterPct?: number;
     timerMinutesRemaining?: number;
     mcuVersion?: string;
 }

@@ -16,6 +16,7 @@ export declare class AirPurifierAccessory {
     private readonly fanSpeedDebouncer;
     private state?;
     private pollHandle?;
+    private refreshing;
     constructor(platform: AirmegaPlatform, accessory: PlatformAccessory, pollingInterval: number);
     private handlePowerSet;
     private handleTargetStateSet;
