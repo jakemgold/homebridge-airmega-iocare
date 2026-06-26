@@ -12,9 +12,11 @@
  */
 /**
  * Stringify a response body with sensitive keys redacted and the total length
- * capped. Safe to embed in thrown Error messages.
+ * capped. Safe to embed in thrown Error messages. `maxLength` defaults to the
+ * conservative cap used for warn/error messages; diagnostic debug logs can pass
+ * a larger value when they need to show a fuller (still redacted) shape.
  */
-export declare function redactBody(body: unknown): string;
+export declare function redactBody(body: unknown, maxLength?: number): string;
 /**
  * Mask the local part of an email-shaped string while preserving the first
  * character and the domain. Used for debug logs that include the IoCare+

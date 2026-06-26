@@ -46,9 +46,11 @@ function redactValue(value) {
 }
 /**
  * Stringify a response body with sensitive keys redacted and the total length
- * capped. Safe to embed in thrown Error messages.
+ * capped. Safe to embed in thrown Error messages. `maxLength` defaults to the
+ * conservative cap used for warn/error messages; diagnostic debug logs can pass
+ * a larger value when they need to show a fuller (still redacted) shape.
  */
-function redactBody(body) {
+function redactBody(body, maxLength = MAX_REDACTED_BODY_LENGTH) {
     let json;
     try {
         json = JSON.stringify(redactValue(body));
@@ -58,8 +60,8 @@ function redactBody(body) {
     }
     if (json === undefined)
         return 'undefined';
-    if (json.length > MAX_REDACTED_BODY_LENGTH) {
-        return json.slice(0, MAX_REDACTED_BODY_LENGTH) + '...[truncated]';
+    if (json.length > maxLength) {
+        return json.slice(0, maxLength) + '...[truncated]';
     }
     return json;
 }

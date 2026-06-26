@@ -53,14 +53,19 @@ class CowayClient {
         }
         const result = [];
         for (const place of this.places) {
-            if (!place.deviceCnt || place.deviceCnt <= 0) {
-                this.opts.log.debug(`Coway: skipping empty place ${place.placeId} (${place.placeName ?? 'unnamed'})`);
-                continue;
-            }
+            // We used to skip any place whose `deviceCnt` was 0, mirroring cowayaio.
+            // But Coway reports deviceCnt=0 for some accounts that nonetheless own a
+            // controllable purifier — shared/guest devices, or simply a stale count
+            // (issue #6). deviceCnt is advisory only now: we always fetch the place's
+            // device list and let the actual rows decide. This is discovery-only, so
+            // the extra fetch per empty place costs one request at startup.
             const rows = await this.fetchPlaceDevices(place.placeId);
+            this.opts.log.debug(`Coway: place ${place.placeId} (${place.placeName ?? 'unnamed'}) ` +
+                `reports deviceCnt=${place.deviceCnt ?? 'n/a'}, device list returned ${rows.length} row(s).`);
             for (const row of rows) {
                 if (row.categoryName !== endpoints_1.CATEGORY_NAME) {
-                    this.opts.log.debug(`Coway: skipping non-purifier device ${row.dvcNick} (categoryName=${row.categoryName})`);
+                    this.opts.log.debug(`Coway: skipping non-purifier device ${row.dvcNick} ` +
+                        `(categoryName=${row.categoryName}, categoryCode=${row.categoryCode ?? 'n/a'}).`);
                     continue;
                 }
                 result.push(this.mapDevice(row));
@@ -231,7 +236,12 @@ class CowayClient {
             pageSize: '100',
         });
         const devices = body?.data?.content;
-        return Array.isArray(devices) ? devices : [];
+        const rows = Array.isArray(devices) ? devices : [];
+        // Diagnostic dump of the raw rows so accounts where discovery comes up empty
+        // can show us exactly what Coway returns (issue #6). Serials, place names,
+        // and other sensitive keys are stripped by redactBody before logging.
+        this.opts.log.debug(`Coway: /places/${placeId}/devices raw rows: ${(0, redact_1.redactBody)(rows, 4000)}`);
+        return rows;
     }
     /**
      * GET a JSON endpoint with the standard authorized headers, refreshing the

@@ -44,9 +44,11 @@ function redactValue(value: unknown): unknown {
 
 /**
  * Stringify a response body with sensitive keys redacted and the total length
- * capped. Safe to embed in thrown Error messages.
+ * capped. Safe to embed in thrown Error messages. `maxLength` defaults to the
+ * conservative cap used for warn/error messages; diagnostic debug logs can pass
+ * a larger value when they need to show a fuller (still redacted) shape.
  */
-export function redactBody(body: unknown): string {
+export function redactBody(body: unknown, maxLength: number = MAX_REDACTED_BODY_LENGTH): string {
   let json: string;
   try {
     json = JSON.stringify(redactValue(body));
@@ -54,8 +56,8 @@ export function redactBody(body: unknown): string {
     return '[unserializable body]';
   }
   if (json === undefined) return 'undefined';
-  if (json.length > MAX_REDACTED_BODY_LENGTH) {
-    return json.slice(0, MAX_REDACTED_BODY_LENGTH) + '...[truncated]';
+  if (json.length > maxLength) {
+    return json.slice(0, maxLength) + '...[truncated]';
   }
   return json;
 }

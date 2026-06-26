@@ -4,6 +4,16 @@ All notable changes to `homebridge-airmega-iocare` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.5] — 2026-06-25
+
+Discovery fix for accounts where a controllable purifier was never detected.
+
+### Fixed
+- Device discovery no longer skips a place when Coway reports `deviceCnt: 0` for it. Coway returns a zero count for some accounts that nonetheless own a controllable purifier (e.g. shared/guest devices, or a stale count), which left those users with no accessory despite the IoCare+ app working fine. The count is now advisory: every place's device list is fetched and the actual rows decide. Discovery-only, so this adds at most one request per empty place at startup. ([#6](https://github.com/jakemgold/homebridge-airmega-iocare/issues/6))
+
+### Added
+- Debug logging of the raw (redacted) per-place device list and each place's reported vs. actual device count, so empty-discovery reports can be diagnosed from logs without guesswork.
+
 ## [1.0.0-beta.4] — 2026-05-23
 
 Per-model gating: removes HomeKit tiles that didn't correspond to real device capabilities. Verified against a live 400S; per-model behavior for 300S, MightyS, 250S, and IconS sourced from cowayaio docstrings, the home-assistant-iocare integration, and Coway's official 400S manual.
