@@ -60,6 +60,19 @@ The plugin targets the entire IoCare+ family — Coway uses the same API surface
 
 If you have one of the untested models, please open an issue with the result.
 
+## Requirements
+
+> **Your purifier must be registered in the IoCare+ app — not the older IoCare app.**
+
+Coway runs two separate apps that share the same login but **not** the same devices:
+
+- **IoCare** — the older app.
+- **IoCare+** — the newer app, and the only one this plugin's cloud API can read.
+
+Devices registered in the old IoCare app do **not** carry over to IoCare+ automatically, even on the same account — they have to be re-registered in IoCare+. If your purifier isn't in IoCare+, the plugin logs in fine but discovers **0 purifiers** (see [Troubleshooting](#plugin-loads-but-no-purifiers-are-discovered)).
+
+IoCare+ is also **region-gated**: as of this writing Coway lists it for the US, South Korea, and partially the UK — not Canada, the Netherlands, and various other regions. If IoCare+ isn't in your App Store, there's a workaround in [Troubleshooting](#plugin-loads-but-no-purifiers-are-discovered).
+
 ## Installation
 
 > **Status: beta.** The plugin works end-to-end on a verified Airmega 400S but has only run in production on one account. Bug reports welcome — see [Reporting issues](#reporting-issues) below.
@@ -143,6 +156,21 @@ Once the plugin is installed, go to **Bridge Settings** on the plugin tile and t
 - **Korean error strings.** Coway's API uses Korean error messages internally even on US-region accounts. The plugin translates the relevant ones (rate-limit, password expiration); other errors are surfaced verbatim and may look surprising.
 
 ## Troubleshooting
+
+### Plugin loads but no purifiers are discovered
+
+If the logs show `Coway: discovered 0 purifier(s).` even though your purifier works fine in the phone app, it's almost certainly registered in the **legacy IoCare app rather than IoCare+** (see [Requirements](#requirements)). This plugin can only see devices registered in IoCare+.
+
+To fix it, register the purifier in IoCare+:
+
+1. Get the IoCare+ app. If it isn't in your country's App Store, either temporarily switch your App Store region to the US, or sideload the Android app ([APK](https://apkpure.com/coway-iocare/com.coway.iocare2)).
+2. Log in with your **existing** Coway credentials.
+3. Add/register your purifier in IoCare+.
+4. Restart Homebridge — the plugin should now discover it.
+
+You can keep using the old IoCare app for day-to-day control; the plugin only needs the device to exist in IoCare+. Registering in an officially-unsupported region isn't guaranteed to work, but it has worked for many users in the same situation.
+
+With debug logging enabled, the plugin prints the raw per-place device list it receives from Coway, which confirms whether Coway is returning your device at all.
 
 ### "No plugin was found for the platform 'AirmegaPlatform'"
 
