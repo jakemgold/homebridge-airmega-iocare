@@ -29,10 +29,10 @@ Each registered purifier appears as a single tile with these controls:
 
 - **Power** on/off
 - **Fan speed**, three steps (1 / 2 / 3) on the rotation slider
-- **Auto / Manual** picker (Apple Home's built-in target-state dropdown)
-- **Sleep / Eco / Smart** preset switches as sub-tiles, mutually exclusive
+- **Auto / Manual** mode picker — Apple Home renders this as **Off / Manual / Auto**, where Off powers the unit down
+- **Preset switches** as sub-tiles. Which presets appear depends on the model ([see below](#controls-by-model)). Turning a preset on activates it; turning it off returns the unit to **Auto**
 - **Display Light** on/off (the LED panel on the front of the unit)
-- **Air quality** sub-tile reporting Coway's 1–4 grade plus PM2.5 and PM10
+- **Air quality** sub-tile reporting Coway's 1–4 grade, plus particulate density (PM2.5 / PM10 — [varies by model](#controls-by-model))
 - **Filter alerts** for both the Pre-filter and the Max2 (HEPA) filter
 
 State refreshes on a configurable polling interval (default 60s). HomeKit reflects out-of-band changes made via the unit itself or the IoCare+ app.
@@ -59,6 +59,20 @@ The plugin targets the entire IoCare+ family — Coway uses the same API surface
 | IconS    | ⚙️ Untested, expected to work       |
 
 If you have one of the untested models, please open an issue with the result.
+
+### Controls by model
+
+Coway exposes different presets and sensors per model, so the plugin only registers the controls each model actually supports. (Registering a switch that does nothing is worse than not showing it.)
+
+| Model   | Preset switch(es) | Particulate sensor |
+|---------|-------------------|--------------------|
+| 400S    | Sleep             | PM10               |
+| 300S    | Sleep             | PM10               |
+| MightyS | Eco               | PM10               |
+| 250S    | Sleep, Smart      | PM2.5 + PM10       |
+| IconS   | Sleep             | PM2.5              |
+
+On the 400S and 300S, "Smart" and "Eco" are **not** switches — they're firmware-driven sub-states the unit enters automatically while in **Auto**, so there's nothing for the user to toggle. The plugin reports them as Auto, matching the unit and the IoCare+ app. Only the 400S row is verified live; the others follow Coway's per-model documentation and the upstream `cowayaio` / home-assistant-iocare references.
 
 ## Requirements
 

@@ -4,6 +4,16 @@ All notable changes to `homebridge-airmega-iocare` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.6] — 2026-06-28
+
+Fixes a one-way preset switch and brings the README in line with per-model behavior.
+
+### Fixed
+- Turning a preset switch (e.g. **Sleep**) **off** in Apple Home now returns the unit to **Auto**. Previously this was a no-op — a leftover from when three mutually-exclusive presets existed, where an "off" was always followed by another preset's "on". After the beta.4 per-model gating, most models (including the 400S) expose a single preset switch, so the switch could be turned on but never off, stranding the unit in the preset until the fan-mode picker was used. The exit is deferred and guarded so the 250S's Sleep/Smart swap still doesn't fire a stray Auto. ([#7](https://github.com/jakemgold/homebridge-airmega-iocare/issues/7))
+
+### Documentation
+- README now documents presets and particulate sensors **per model** (the 400S exposes only the Sleep preset and PM10; "Smart"/"Eco" are firmware-driven Auto sub-states, not switches), and clarifies that Apple Home renders the mode picker as Off / Manual / Auto. The old "Sleep / Eco / Smart, mutually exclusive" description predated the beta.4 per-model gating. ([#7](https://github.com/jakemgold/homebridge-airmega-iocare/issues/7))
+
 ## [1.0.0-beta.5] — 2026-06-25
 
 Discovery fix for accounts where a controllable purifier was never detected.

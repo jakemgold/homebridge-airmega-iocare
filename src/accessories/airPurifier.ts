@@ -40,6 +40,14 @@ const FIRMWARE_REVISION_FALLBACK = '0.0.0';
 // long enough to absorb a typical drag.
 const SETTER_DEBOUNCE_MS = 250;
 
+// When a preset switch is turned off, we exit to Auto — but only after a short
+// delay. On the 250S (the one model with two presets) Apple Home fires OFF on
+// the old switch immediately before ON on the new one when swapping presets;
+// this window lets that ON arrive and cancel the exit so we don't fire a stray
+// Auto command between them. Comfortably longer than the back-to-back OFF/ON
+// gap, short enough that exiting Sleep still feels immediate.
+const PRESET_EXIT_DEBOUNCE_MS = 400;
+
 export class AirPurifierAccessory {
   private readonly device: CowayDevice;
   private readonly pmCaps: PmCapabilities;
@@ -58,6 +66,7 @@ export class AirPurifierAccessory {
 
   private state?: DeviceState;
   private pollHandle?: NodeJS.Timeout;
+  private presetExitHandle?: NodeJS.Timeout;
   private refreshing = false;
 
   constructor(
@@ -181,12 +190,14 @@ export class AirPurifierAccessory {
   // --- characteristic handlers ---
 
   private async handlePowerSet(value: CharacteristicValue): Promise<void> {
+    this.cancelPresetExit();
     const target = value === 1;
     await this.platform.client.sendCommand(this.device, Attribute.POWER, target ? '1' : '0');
     if (this.state) this.state.power = target;
   }
 
   private async handleTargetStateSet(value: CharacteristicValue): Promise<void> {
+    this.cancelPresetExit();
     if (value === 1) {
       await this.platform.client.sendCommand(this.device, Attribute.MODE, ModeValue.AUTO);
       if (this.state) this.state.mode = 'auto';
@@ -202,6 +213,7 @@ export class AirPurifierAccessory {
   }
 
   private async handleRotationSpeedSet(value: CharacteristicValue): Promise<void> {
+    this.cancelPresetExit();
     const speed = this.homeKitToFanSpeed(value as number);
     // Update local state optimistically so the next characteristic read is
     // consistent and HomeKit doesn't show stale values during the debounce
@@ -220,9 +232,12 @@ export class AirPurifierAccessory {
 
   private async handlePresetSet(preset: PresetSpec, value: CharacteristicValue): Promise<void> {
     if (value) {
+      // A fresh preset activation cancels any pending exit from a preset that
+      // was just turned off (the 250S swap fires OFF-old then ON-new).
+      this.cancelPresetExit();
       await this.platform.client.sendCommand(this.device, Attribute.MODE, preset.modeValue);
       if (this.state) this.state.mode = preset.apiMode;
-      // Mutual exclusion: clear the other two preset switches synchronously.
+      // Mutual exclusion: clear the other preset switches synchronously.
       for (const other of PRESETS) {
         if (other.key === preset.key) continue;
         const svc = this.presetServices.get(other.key);
@@ -230,10 +245,51 @@ export class AirPurifierAccessory {
       }
       return;
     }
-    // Per HANDOFF.md: when a preset is explicitly turned off and no other preset
-    // is being activated, do nothing. The next poll reconciles. This avoids
-    // sending a stray manual/auto command when the user is mid-switch between
-    // presets (HomeKit sends OFF on the old switch before ON on the new one).
+    // Preset turned off. With three mutually-exclusive presets this was a no-op:
+    // HomeKit sends OFF on the old switch before ON on the new one, so we waited
+    // for the ON. But most models now expose a single preset switch (issue #7),
+    // and for those an "off" has no following "on" — leaving the user stranded
+    // in the preset with the switch springing back on at the next poll. So we
+    // exit to Auto, deferred and guarded (see schedulePresetExit) so the 250S's
+    // two-preset swap still doesn't fire a stray Auto.
+    this.schedulePresetExit(preset);
+  }
+
+  /** Cancel a pending "exit preset to Auto" deferred by a preset switch-off. */
+  private cancelPresetExit(): void {
+    if (this.presetExitHandle) {
+      clearTimeout(this.presetExitHandle);
+      this.presetExitHandle = undefined;
+    }
+  }
+
+  /**
+   * Schedule an exit-to-Auto after a preset switch is turned off. Deferred by
+   * PRESET_EXIT_DEBOUNCE_MS and guarded: if the device is no longer in this
+   * preset's mode when the timer fires — because another preset was activated,
+   * the fan speed changed, or the mode picker was used in the meantime — we
+   * leave it alone. Any of those user actions also cancels the timer outright.
+   */
+  private schedulePresetExit(preset: PresetSpec): void {
+    this.cancelPresetExit();
+    this.presetExitHandle = setTimeout(() => {
+      this.presetExitHandle = undefined;
+      if (!this.state || this.state.mode !== preset.apiMode) return;
+      // Detached timer: a rejection here would crash Homebridge, so catch it.
+      this.platform.client.sendCommand(this.device, Attribute.MODE, ModeValue.AUTO)
+        .then(() => {
+          if (this.state) this.state.mode = 'auto';
+          this.clearAllPresets();
+          this.purifier.updateCharacteristic(
+            this.platform.Characteristic.TargetAirPurifierState,
+            this.isAutoForUser('auto') ? 1 : 0,
+          );
+        })
+        .catch(err => this.platform.log.warn(
+          `${this.device.name}: exit-preset command failed: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+        ));
+    }, PRESET_EXIT_DEBOUNCE_MS);
   }
 
   private async handleLightSet(value: CharacteristicValue): Promise<void> {

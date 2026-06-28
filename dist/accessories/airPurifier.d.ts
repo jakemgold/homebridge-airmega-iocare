@@ -18,12 +18,23 @@ export declare class AirPurifierAccessory {
     private readonly fanSpeedDebouncer;
     private state?;
     private pollHandle?;
+    private presetExitHandle?;
     private refreshing;
     constructor(platform: AirmegaPlatform, accessory: PlatformAccessory, pollingInterval: number);
     private handlePowerSet;
     private handleTargetStateSet;
     private handleRotationSpeedSet;
     private handlePresetSet;
+    /** Cancel a pending "exit preset to Auto" deferred by a preset switch-off. */
+    private cancelPresetExit;
+    /**
+     * Schedule an exit-to-Auto after a preset switch is turned off. Deferred by
+     * PRESET_EXIT_DEBOUNCE_MS and guarded: if the device is no longer in this
+     * preset's mode when the timer fires — because another preset was activated,
+     * the fan speed changed, or the mode picker was used in the meantime — we
+     * leave it alone. Any of those user actions also cancels the timer outright.
+     */
+    private schedulePresetExit;
     private handleLightSet;
     private startPolling;
     private refresh;
