@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="https://www.npmjs.com/package/homebridge-airmega-iocare">
-    <img alt="npm" src="https://img.shields.io/npm/v/homebridge-airmega-iocare/beta.svg?label=npm%20%40beta&color=orange">
+    <img alt="npm" src="https://img.shields.io/npm/v/homebridge-airmega-iocare.svg?color=blue">
   </a>
   <a href="LICENSE">
     <img alt="License" src="https://img.shields.io/badge/license-MIT-blue.svg">
@@ -89,7 +89,7 @@ IoCare+ is also **region-gated**: as of this writing Coway lists it for the US, 
 
 ## Installation
 
-> **Status: beta.** The plugin works end-to-end on a verified Airmega 400S but has only run in production on one account. Bug reports welcome — see [Reporting issues](#reporting-issues) below.
+> **Status: stable.** Verified live on an Airmega 400S. The other IoCare+ models share the same API and should work but aren't individually tested, so model confirmations and bug reports are welcome. See [Reporting issues](#reporting-issues) below.
 
 ### Recommended: Homebridge UI
 

@@ -4,6 +4,15 @@ All notable changes to `homebridge-airmega-iocare` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] — 2026-06-28
+
+First stable release. Functionally identical to beta.6, promoted after a dogfooding period and two externally reported issues (empty device discovery and the one-way Sleep switch), both resolved. The plugin is verified live on an Airmega 400S and targets Coway's current IoCare+ API.
+
+### Highlights across the 1.0.0 line
+- Full Apple Home control of the Airmega 400S: power, three-step fan speed, Auto/Manual, the Sleep preset, Display Light, air-quality grade, PM10, and both filter indicators, with per-model gating for the 300S, 250S, MightyS, and IconS.
+- Resilient by design: exponential backoff on 5xx/429, debounced setters, graceful degradation when Coway is unreachable, and redaction of sensitive data from logs.
+- Runs on Homebridge 1.8.x and 2.x.
+
 ## [1.0.0-beta.6] — 2026-06-28
 
 Fixes a one-way preset switch and brings the README in line with per-model behavior.

@@ -1,7 +1,7 @@
 {
   "displayName": "Homebridge Airmega IoCare+",
   "name": "homebridge-airmega-iocare",
-  "version": "1.0.0-beta.6",
+  "version": "1.0.0",
   "description": "Homebridge plugin for Coway Airmega purifiers (400S verified; 300S / 250S / MightyS / IconS share the IoCare+ API).",
   "license": "MIT",
   "author": "Jake Goldman <j@kegoldman.com>",
@@ -23,8 +23,8 @@
     "README.md"
   ],
   "engines": {
-    "node": ">=18.20.4",
-    "homebridge": "^1.8.0 || ^2.0.0-beta.0"
+    "node": "^20.18.0 || ^22.10.0 || ^24.0.0",
+    "homebridge": "^1.8.0 || ^2.0.0"
   },
   "scripts": {
     "lint": "eslint src/**/*.ts",
