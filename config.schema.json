@@ -4,24 +4,22 @@
   "singular": true,
   "schema": {
     "type": "object",
+    "required": ["name", "username", "password"],
     "properties": {
       "name": {
         "title": "Name",
         "type": "string",
-        "default": "Airmega",
-        "required": true
+        "default": "Airmega"
       },
       "username": {
         "title": "IoCare+ Username",
         "description": "Your IoCare+ login — email address or phone number.",
         "type": "string",
-        "required": true,
         "maxLength": 256
       },
       "password": {
         "title": "IoCare+ Password",
         "type": "string",
-        "required": true,
         "maxLength": 256,
         "x-schema-form": { "type": "password" }
       },

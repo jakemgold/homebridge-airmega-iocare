@@ -4,6 +4,13 @@ All notable changes to `homebridge-airmega-iocare` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] — 2026-06-30
+
+Config-schema fix required for Homebridge Verified. No functional or runtime change.
+
+### Fixed
+- `config.schema.json` now declares its mandatory fields with a top-level `required` array (`["name", "username", "password"]`) instead of the non-standard per-field `"required": true`. The per-field boolean is invalid JSON Schema and failed the Homebridge Verified config-schema check; the Homebridge UI already treated these fields as required, so behavior is unchanged. ([homebridge/plugins#1100](https://github.com/homebridge/plugins/issues/1100))
+
 ## [1.0.0] — 2026-06-28
 
 First stable release. Functionally identical to beta.6, promoted after a dogfooding period and two externally reported issues (empty device discovery and the one-way Sleep switch), both resolved. The plugin is verified live on an Airmega 400S and targets Coway's current IoCare+ API.
