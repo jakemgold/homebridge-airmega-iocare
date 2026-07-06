@@ -1,43 +1,38 @@
 "use strict";
-// All Coway control-command codes and value mappings live here.
-// Source: ported from RobertD502/cowayaio (Python).
+// Per-model capability tables live here. The Coway protocol vocabulary
+// (register codes, mode/power/light values) lives in src/api/endpoints.ts —
+// ONE table serves both the command path and the status-read path, so the
+// two directions can't drift.
+// Source: ported from RobertD502/cowayaio (Python) and
+// RobertD502/home-assistant-iocare's per-model gating.
 // Verified live for the 400S during Phase 1 task 1 — see HANDOFF.md notes.
-//
-// Coway addresses each control via a hex-string "attribute" key. The control endpoint
-// accepts {attributes: {<key>: <value>}, ...}. Values are strings (some endpoints
-// accept raw ints — check while porting).
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.PRESET_CAPABILITIES_UNKNOWN = exports.PRESET_CAPABILITIES = exports.PM_CAPABILITIES_UNKNOWN = exports.PM_CAPABILITIES = exports.PREFILTER_CYCLE = exports.LightMode = exports.ModeValue = exports.Attribute = void 0;
-exports.Attribute = {
-    POWER: '0001', // '1' on, '0' off
-    MODE: '0002', // 1=auto, 2=night/sleep, 5=rapid (250s), 6=eco
-    FAN_SPEED: '0003', // '1' | '2' | '3'
-    LIGHT: '0007', // 0=off, 2=on (400S binary). 250s/IconS support more values via LightMode.
-    TIMER: '0008', // minutes: 0 | 60 | 120 | 240 | 480
-    BUTTON_LOCK: '0024', // 0=off, 1=on
-    SMART_SENSITIVITY: '000A', // 1=sensitive, 2=moderate, 3=insensitive
+exports.PRESET_CAPABILITIES_UNKNOWN = exports.PRESET_CAPABILITIES = exports.PM_CAPABILITIES_UNKNOWN = exports.PM_CAPABILITIES = exports.LIGHT_SWITCH_UNKNOWN = exports.LIGHT_SWITCH_MODELS = void 0;
+/**
+ * Per-model Display Light switch availability.
+ *
+ * On the 400S family the 0007 register is a plain binary (0=off, 2=on). On
+ * the 250S and IconS the same register is multi-mode with inverted values:
+ * cowayaio's LightMode enum for those models is ON='0', AQI_OFF='1',
+ * OFF='2', HALF_OFF='3' (IconS only). Sending our 400S "on" value ('2') to a
+ * 250S turns the light OFF, and reading `=== 2` as "on" inverts the switch
+ * state — home-assistant-iocare hides its plain light switch for exactly
+ * these two models and exposes a multi-mode select instead. HomeKit has no
+ * clean select primitive on a purifier tile, so we hide the switch on those
+ * models rather than ship an inverted control.
+ */
+exports.LIGHT_SWITCH_MODELS = {
+    // Verified
+    'AP-2015E': true, // Airmega 400S
+    // Unverified — per cowayaio's plain async_set_light ("NOT used for 250s")
+    'AP-1521E': true, // Airmega 300S
+    'AP-1512HHS': true, // Airmega MightyS
+    'AP-1719A': false, // Airmega 250S — inverted multi-mode register
+    'AP-1722B': false, // Airmega IconS — inverted multi-mode register
 };
-// Mode register (0x0002) values, keyed by cowayaio's naming:
-exports.ModeValue = {
-    AUTO: '1',
-    NIGHT: '2', // surfaced as the "Sleep" preset switch in HomeKit
-    RAPID: '5', // 250S only — surfaced as the "Smart" preset switch where supported
-    ECO: '6', // surfaced as the "Eco" preset switch in HomeKit
-};
-// Light register (0x0007) values for models that support more than on/off.
-exports.LightMode = {
-    OFF: '0',
-    ON: '2',
-    // 250S/IconS may support additional modes — fill in when porting from cowayaio constants.
-};
-// Pre-filter wash-cycle frequency values (0x0001 on the control-param endpoint).
-// Index is the "weeks" exposed in the IoCare+ app (2, 3, or 4).
-// Out of scope for v1 but kept here so the porting target is one file.
-exports.PREFILTER_CYCLE = {
-    2: '1',
-    3: '2',
-    4: '3',
-};
+// Conservative default for an unrecognized productModel: hide the switch.
+// A missing control is an inconvenience; an inverted one actively lies.
+exports.LIGHT_SWITCH_UNKNOWN = false;
 exports.PM_CAPABILITIES = {
     // Verified
     'AP-2015E': { pm10: true, pm25: false }, // Airmega 400S

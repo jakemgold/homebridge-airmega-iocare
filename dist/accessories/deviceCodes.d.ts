@@ -1,23 +1,18 @@
-export declare const Attribute: {
-    readonly POWER: "0001";
-    readonly MODE: "0002";
-    readonly FAN_SPEED: "0003";
-    readonly LIGHT: "0007";
-    readonly TIMER: "0008";
-    readonly BUTTON_LOCK: "0024";
-    readonly SMART_SENSITIVITY: "000A";
-};
-export declare const ModeValue: {
-    readonly AUTO: "1";
-    readonly NIGHT: "2";
-    readonly RAPID: "5";
-    readonly ECO: "6";
-};
-export declare const LightMode: {
-    readonly OFF: "0";
-    readonly ON: "2";
-};
-export declare const PREFILTER_CYCLE: Record<number, string>;
+/**
+ * Per-model Display Light switch availability.
+ *
+ * On the 400S family the 0007 register is a plain binary (0=off, 2=on). On
+ * the 250S and IconS the same register is multi-mode with inverted values:
+ * cowayaio's LightMode enum for those models is ON='0', AQI_OFF='1',
+ * OFF='2', HALF_OFF='3' (IconS only). Sending our 400S "on" value ('2') to a
+ * 250S turns the light OFF, and reading `=== 2` as "on" inverts the switch
+ * state — home-assistant-iocare hides its plain light switch for exactly
+ * these two models and exposes a multi-mode select instead. HomeKit has no
+ * clean select primitive on a purifier tile, so we hide the switch on those
+ * models rather than ship an inverted control.
+ */
+export declare const LIGHT_SWITCH_MODELS: Record<string, boolean>;
+export declare const LIGHT_SWITCH_UNKNOWN = false;
 /**
  * Per-model PM sensor availability for the Airmega family.
  *

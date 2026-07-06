@@ -28,4 +28,4 @@ export declare class RateLimitedError extends Error {
  *  4. POST the auth code to /com/token to exchange for access + refresh tokens.
  */
 export declare function performLogin(params: LoginParams): Promise<AuthTokens>;
-export declare function refreshAccessToken(refreshToken: string): Promise<AuthTokens>;
+export declare function refreshAccessToken(refreshToken: string, log: Logger): Promise<AuthTokens>;

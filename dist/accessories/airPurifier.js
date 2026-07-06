@@ -1,11 +1,12 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.AirPurifierAccessory = void 0;
+const endpoints_1 = require("../api/endpoints");
 const deviceCodes_1 = require("./deviceCodes");
 const PRESETS = [
-    { key: 'sleep', subtype: 'preset-sleep', display: 'Sleep', modeValue: deviceCodes_1.ModeValue.NIGHT, apiMode: 'night' },
-    { key: 'eco', subtype: 'preset-eco', display: 'Eco', modeValue: deviceCodes_1.ModeValue.ECO, apiMode: 'eco' },
-    { key: 'smart', subtype: 'preset-smart', display: 'Smart', modeValue: deviceCodes_1.ModeValue.RAPID, apiMode: 'rapid' },
+    { key: 'sleep', subtype: 'preset-sleep', display: 'Sleep', modeValue: endpoints_1.ModeValue.NIGHT, apiMode: 'night' },
+    { key: 'eco', subtype: 'preset-eco', display: 'Eco', modeValue: endpoints_1.ModeValue.ECO, apiMode: 'eco' },
+    { key: 'smart', subtype: 'preset-smart', display: 'Smart', modeValue: endpoints_1.ModeValue.RAPID, apiMode: 'rapid' },
 ];
 const LIGHT_SUBTYPE = 'led';
 // HAP requires FirmwareRevision to be a dotted numeric string (e.g. '1.0.6').
@@ -20,6 +21,12 @@ const FIRMWARE_REVISION_FALLBACK = '0.0.0';
 // 250ms is short enough that the user perceives the action as immediate but
 // long enough to absorb a typical drag.
 const SETTER_DEBOUNCE_MS = 250;
+// Poll failures are debug-level (they're routine: one 5xx, one timeout) until
+// this many fail consecutively — then warn, because the user is now looking
+// at stale state with no signal at default log level. Re-warn periodically so
+// a long outage doesn't go quiet after a single line.
+const POLL_FAILURE_WARN_THRESHOLD = 3;
+const POLL_FAILURE_REWARN_EVERY = 30;
 // When a preset switch is turned off, we exit to Auto — but only after a short
 // delay. On the 250S (the one model with two presets) Apple Home fires OFF on
 // the old switch immediately before ON on the new one when swapping presets;
@@ -47,6 +54,12 @@ class AirPurifierAccessory {
     pollHandle;
     presetExitHandle;
     refreshing = false;
+    // Bumped whenever a device command is initiated. refresh() compares the
+    // value before and after its fetch: a poll snapshot taken before a command
+    // resolved after it would otherwise overwrite the optimistic state and
+    // flip HomeKit back to pre-command values until the next poll.
+    commandEpoch = 0;
+    consecutivePollFailures = 0;
     constructor(platform, accessory, pollingInterval) {
         this.platform = platform;
         this.accessory = accessory;
@@ -59,12 +72,14 @@ class AirPurifierAccessory {
         // warn covers the consequences for both capability tables.
         if (!deviceCodes_1.PM_CAPABILITIES[this.device.productModel] || !deviceCodes_1.PRESET_CAPABILITIES[this.device.productModel]) {
             platform.log.warn(`${this.device.name}: unknown productModel "${this.device.productModel}"; ` +
-                `not exposing PM2.5/PM10 to HomeKit and registering only the Sleep preset. ` +
+                `not exposing PM2.5/PM10 or the Display Light switch to HomeKit and registering ` +
+                `only the Sleep preset. ` +
                 `Please file an issue with this productModel string so a capability row can be added.`);
         }
         this.fanSpeedDebouncer = new Debouncer(SETTER_DEBOUNCE_MS, async (speed) => {
             try {
-                await this.platform.client.sendCommand(this.device, deviceCodes_1.Attribute.FAN_SPEED, String(speed));
+                this.commandEpoch++;
+                await this.platform.client.sendCommand(this.device, endpoints_1.Attribute.FAN_SPEED, String(speed));
             }
             catch (err) {
                 this.platform.log.warn(`${this.device.name}: fan speed command failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -76,8 +91,18 @@ class AirPurifierAccessory {
         this.accessoryInfo
             .setCharacteristic(C.Manufacturer, 'Coway')
             .setCharacteristic(C.Model, this.device.productModel ?? this.device.model)
-            .setCharacteristic(C.SerialNumber, this.device.serial ?? this.device.deviceId)
-            .setCharacteristic(C.FirmwareRevision, FIRMWARE_REVISION_FALLBACK);
+            .setCharacteristic(C.SerialNumber, this.device.serial ?? this.device.deviceId);
+        // Preserve a firmware version restored from the accessory cache rather
+        // than stomping it back to the fallback on every restart — the real value
+        // only returns with the first successful poll, which a Coway outage at
+        // boot can postpone indefinitely.
+        const cachedFw = this.accessoryInfo.getCharacteristic(C.FirmwareRevision).value;
+        if (typeof cachedFw === 'string' && FIRMWARE_REVISION_RE.test(cachedFw)) {
+            this.lastFirmwareRevision = cachedFw;
+        }
+        else {
+            this.accessoryInfo.setCharacteristic(C.FirmwareRevision, FIRMWARE_REVISION_FALLBACK);
+        }
         this.purifier = accessory.getService(S.AirPurifier) ?? accessory.addService(S.AirPurifier);
         this.setServiceName(this.purifier, this.device.name);
         // Mark the AirPurifier as the primary service so Apple Home shows the
@@ -134,7 +159,12 @@ class AirPurifierAccessory {
                 .onSet(v => this.handlePresetSet(preset, v));
             this.presetServices.set(preset.key, svc);
         }
-        const exposeLight = platform.config.exposeLight ?? true;
+        // Per-model gating on top of the user config: the 250S/IconS light
+        // register is inverted relative to the 400S semantics we speak (see
+        // LIGHT_SWITCH_MODELS), so exposing the switch there would show the
+        // opposite state and send the opposite command.
+        const modelHasLightSwitch = deviceCodes_1.LIGHT_SWITCH_MODELS[this.device.productModel] ?? deviceCodes_1.LIGHT_SWITCH_UNKNOWN;
+        const exposeLight = (platform.config.exposeLight ?? true) && modelHasLightSwitch;
         if (exposeLight) {
             this.lightService = accessory.getServiceById(S.Switch, LIGHT_SUBTYPE)
                 ?? accessory.addService(S.Switch, 'Display Light', LIGHT_SUBTYPE);
@@ -144,7 +174,8 @@ class AirPurifierAccessory {
                 .onSet(v => this.handleLightSet(v));
         }
         else {
-            // If the user disabled light exposure, remove a previously-registered service.
+            // Remove a previously-registered service — user disabled it, or the
+            // accessory was cached from a version that exposed it on every model.
             const stale = accessory.getServiceById(S.Switch, LIGHT_SUBTYPE);
             if (stale)
                 accessory.removeService(stale);
@@ -154,15 +185,29 @@ class AirPurifierAccessory {
     // --- characteristic handlers ---
     async handlePowerSet(value) {
         this.cancelPresetExit();
+        // A pending debounced fan-speed write would land after this command and
+        // wake the unit or force manual mode — the power command supersedes it.
+        this.fanSpeedDebouncer.cancel();
         const target = value === 1;
-        await this.platform.client.sendCommand(this.device, deviceCodes_1.Attribute.POWER, target ? '1' : '0');
+        this.commandEpoch++;
+        await this.platform.client.sendCommand(this.device, endpoints_1.Attribute.POWER, target ? endpoints_1.PowerValue.ON : endpoints_1.PowerValue.OFF);
         if (this.state)
             this.state.power = target;
+        // Push the paired current-state characteristic so event-subscribed
+        // controllers don't sit in the transitional "Starting…" combination
+        // (Active=1, CurrentState=INACTIVE) until the next poll.
+        this.purifier.updateCharacteristic(this.platform.Characteristic.CurrentAirPurifierState, target ? 2 : 0);
     }
     async handleTargetStateSet(value) {
         this.cancelPresetExit();
+        // A pending debounced fan-speed write fires after the mode command and
+        // would knock the device straight back out of the target mode (fan
+        // writes implicitly force manual). state.fanSpeed already carries the
+        // debounced value, so the manual branch below re-sends the same intent.
+        this.fanSpeedDebouncer.cancel();
         if (value === 1) {
-            await this.platform.client.sendCommand(this.device, deviceCodes_1.Attribute.MODE, deviceCodes_1.ModeValue.AUTO);
+            this.commandEpoch++;
+            await this.platform.client.sendCommand(this.device, endpoints_1.Attribute.MODE, endpoints_1.ModeValue.AUTO);
             if (this.state)
                 this.state.mode = 'auto';
             this.clearAllPresets();
@@ -170,15 +215,34 @@ class AirPurifierAccessory {
         }
         // Going to manual: writing fan speed implicitly switches the device out of auto.
         // We re-send the current fan speed so we don't accidentally jump to a new speed.
-        const fan = this.state?.fanSpeed ?? 1;
-        await this.platform.client.sendCommand(this.device, deviceCodes_1.Attribute.FAN_SPEED, String(fan));
+        // Clamp to the FAN_SPEED command contract ('1'|'2'|'3'): reported speeds
+        // above 3 are read-only telemetry for special modes (5 = Rapid on the
+        // 250S) and commanding them back would re-trigger those modes or be
+        // rejected outright.
+        const fan = Math.min(this.state?.fanSpeed ?? 1, 3);
+        this.commandEpoch++;
+        await this.platform.client.sendCommand(this.device, endpoints_1.Attribute.FAN_SPEED, String(fan));
         if (this.state)
             this.state.mode = 'manual';
         this.clearAllPresets();
     }
     async handleRotationSpeedSet(value) {
         this.cancelPresetExit();
-        const speed = this.homeKitToFanSpeed(value);
+        const pct = value;
+        if (pct === 0) {
+            // The Home app sends RotationSpeed=0 together with Active=0 when the
+            // slider is dragged to zero. Power-off is handled by handlePowerSet;
+            // mapping 0 to a speed here would fire a stray FAN_SPEED write at the
+            // just-powered-off unit 250ms later (and fan writes implicitly force
+            // manual mode). Match the reference integration: 0 is power-off only.
+            this.fanSpeedDebouncer.cancel();
+            return;
+        }
+        const speed = this.homeKitToFanSpeed(pct);
+        // Bump the epoch now, not just when the debounced send fires: the
+        // optimistic state below must survive a poll snapshot that resolves
+        // inside the 250ms debounce window.
+        this.commandEpoch++;
         // Update local state optimistically so the next characteristic read is
         // consistent and HomeKit doesn't show stale values during the debounce
         // window.
@@ -187,6 +251,9 @@ class AirPurifierAccessory {
             this.state.mode = 'manual';
         }
         this.clearAllPresets();
+        // A manual speed write exits auto; tell subscribed controllers now
+        // instead of leaving the mode picker stale until the next poll.
+        this.purifier.updateCharacteristic(this.platform.Characteristic.TargetAirPurifierState, 0);
         // When the user drags the speed slider, Apple Home spams onSet calls
         // (often three or four per drag). Coalesce them and only fire the latest
         // value to Coway after the user pauses, capping API traffic and avoiding
@@ -196,9 +263,13 @@ class AirPurifierAccessory {
     async handlePresetSet(preset, value) {
         if (value) {
             // A fresh preset activation cancels any pending exit from a preset that
-            // was just turned off (the 250S swap fires OFF-old then ON-new).
+            // was just turned off (the 250S swap fires OFF-old then ON-new) — and
+            // any pending debounced fan-speed write, which would otherwise fire
+            // after the mode command and drop the device back to manual.
             this.cancelPresetExit();
-            await this.platform.client.sendCommand(this.device, deviceCodes_1.Attribute.MODE, preset.modeValue);
+            this.fanSpeedDebouncer.cancel();
+            this.commandEpoch++;
+            await this.platform.client.sendCommand(this.device, endpoints_1.Attribute.MODE, preset.modeValue);
             if (this.state)
                 this.state.mode = preset.apiMode;
             // Mutual exclusion: clear the other preset switches synchronously.
@@ -237,19 +308,25 @@ class AirPurifierAccessory {
         this.cancelPresetExit();
         this.presetExitHandle = setTimeout(() => {
             this.presetExitHandle = undefined;
-            if (!this.state || this.state.mode !== preset.apiMode)
+            // Skip the exit only when we KNOW the device has left the preset.
+            // Unknown state (no successful poll yet — a slow or failing first
+            // fetch) must still exit: the preset ON command went out regardless of
+            // state, so bailing here would strand the device in the preset while
+            // the HomeKit switch reads off.
+            if (this.state && this.state.mode !== preset.apiMode)
                 return;
             // Detached timer: a rejection here would crash Homebridge, so catch it.
-            this.platform.client.sendCommand(this.device, deviceCodes_1.Attribute.MODE, deviceCodes_1.ModeValue.AUTO)
-                .then(() => {
-                if (this.state)
-                    this.state.mode = 'auto';
-                this.clearAllPresets();
-                this.purifier.updateCharacteristic(this.platform.Characteristic.TargetAirPurifierState, this.isAutoForUser('auto') ? 1 : 0);
-            })
-                .catch(err => this.platform.log.warn(`${this.device.name}: exit-preset command failed: ` +
+            this.exitPresetToAuto().catch(err => this.platform.log.warn(`${this.device.name}: exit-preset command failed: ` +
                 `${err instanceof Error ? err.message : String(err)}`));
         }, PRESET_EXIT_DEBOUNCE_MS);
+    }
+    async exitPresetToAuto() {
+        this.commandEpoch++;
+        await this.platform.client.sendCommand(this.device, endpoints_1.Attribute.MODE, endpoints_1.ModeValue.AUTO);
+        if (this.state)
+            this.state.mode = 'auto';
+        this.clearAllPresets();
+        this.purifier.updateCharacteristic(this.platform.Characteristic.TargetAirPurifierState, this.isAutoForUser('auto') ? 1 : 0);
     }
     async handleLightSet(value) {
         if (this.state && !this.state.power) {
@@ -259,7 +336,8 @@ class AirPurifierAccessory {
             this.lightService?.updateCharacteristic(this.platform.Characteristic.On, this.state.lightOn);
             return;
         }
-        await this.platform.client.sendCommand(this.device, deviceCodes_1.Attribute.LIGHT, value ? deviceCodes_1.LightMode.ON : deviceCodes_1.LightMode.OFF);
+        this.commandEpoch++;
+        await this.platform.client.sendCommand(this.device, endpoints_1.Attribute.LIGHT, value ? endpoints_1.LightMode.ON : endpoints_1.LightMode.OFF);
         if (this.state)
             this.state.lightOn = !!value;
     }
@@ -270,8 +348,24 @@ class AirPurifierAccessory {
         // form body in their stringified form.
         this.refresh().catch(e => this.platform.log.warn(`${this.device.name}: initial refresh failed: ${e instanceof Error ? e.message : String(e)}`));
         this.pollHandle = setInterval(() => {
-            this.refresh().catch(e => this.platform.log.debug(`${this.device.name}: poll failed: ${e instanceof Error ? e.message : String(e)}`));
+            this.refresh().catch(e => this.notePollFailure(e));
         }, this.pollingInterval);
+    }
+    /**
+     * Log a poll failure. One-off failures are routine (a 5xx, a timeout) and
+     * stay at debug; a streak means HomeKit is serving stale state with no
+     * user-visible signal, so escalate to warn at the threshold and re-warn
+     * periodically for the duration of the outage.
+     */
+    notePollFailure(e) {
+        this.consecutivePollFailures++;
+        const msg = `${this.device.name}: poll failed: ${e instanceof Error ? e.message : String(e)}`;
+        const n = this.consecutivePollFailures;
+        if (n === POLL_FAILURE_WARN_THRESHOLD || n % POLL_FAILURE_REWARN_EVERY === 0) {
+            this.platform.log.warn(`${msg} (${n} consecutive failures; HomeKit is showing last known state)`);
+            return;
+        }
+        this.platform.log.debug(msg);
     }
     async refresh() {
         // Guard against overlapping polls: a slow Coway response (3 round-trips,
@@ -283,7 +377,23 @@ class AirPurifierAccessory {
         }
         this.refreshing = true;
         try {
-            this.state = await this.platform.client.getDeviceState(this.device);
+            const epochAtFetch = this.commandEpoch;
+            const snapshot = await this.platform.client.getDeviceState(this.device);
+            // Coway responded — the outage (if any) is over, whether or not we
+            // adopt this particular snapshot below.
+            if (this.consecutivePollFailures >= POLL_FAILURE_WARN_THRESHOLD) {
+                this.platform.log.info(`${this.device.name}: polling recovered after ${this.consecutivePollFailures} failures.`);
+            }
+            this.consecutivePollFailures = 0;
+            if (epochAtFetch !== this.commandEpoch) {
+                // A user command was initiated while this poll was in flight, so the
+                // snapshot predates it. Adopting it would overwrite the optimistic
+                // state and flip HomeKit back to pre-command values. Drop it; the
+                // next poll reports the post-command state.
+                this.platform.log.debug(`${this.device.name}: discarding poll snapshot fetched before a command`);
+                return;
+            }
+            this.state = snapshot;
             this.pushUpdates();
         }
         finally {
@@ -374,6 +484,9 @@ class AirPurifierAccessory {
      * so cached accessories that were registered before per-model gating shed
      * stale PM2.5/PM10 characteristics rather than showing a fake 0.
      */
+    // `any` because HAP-NodeJS's characteristic constructors are typed as
+    // `WithUUID<new () => Characteristic>` unions that don't flow through
+    // getCharacteristic/testCharacteristic overloads cleanly.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     applyPmCharacteristic(ctor, supported) {
         if (supported) {
@@ -401,12 +514,22 @@ class AirPurifierAccessory {
         return false;
     }
     fanSpeedToHomeKit(s) {
-        return Math.round((s / 3) * 100);
+        // Coway reports speeds above 3 while in special modes (5 = Rapid on the
+        // 250S); RotationSpeed is 0-100 over our three steps, so cap at 3 rather
+        // than emitting an out-of-range value HAP would warn about every poll.
+        const step = Math.min(s, 3);
+        return Math.round((step / 3) * 100);
     }
     homeKitToFanSpeed(pct) {
-        if (pct <= 33)
+        // iOS snaps the slider to multiples of minStep (100/3), so writes arrive
+        // as 33.333... and 66.666..., not integers — and HAP passes the floats
+        // through unrounded. Round first, then compare against the rounded
+        // detents; bare `<= 33` / `<= 66` mapped every detent one speed high and
+        // made speed 1 unreachable from the slider.
+        const rounded = Math.round(pct);
+        if (rounded <= 33)
             return 1;
-        if (pct <= 66)
+        if (rounded <= 67)
             return 2;
         return 3;
     }
@@ -439,6 +562,18 @@ class Debouncer {
             // any caller and an unhandled rejection would crash Homebridge.
             this.onFire(v).catch(() => undefined);
         }, this.delayMs);
+    }
+    /**
+     * Drop the pending value, if any. Called when a superseding command (power,
+     * mode, preset) is sent: a fan-speed write landing after it would knock the
+     * device back out of the mode the user just selected.
+     */
+    cancel() {
+        if (this.timer) {
+            clearTimeout(this.timer);
+            this.timer = undefined;
+        }
+        this.latest = undefined;
     }
 }
 //# sourceMappingURL=airPurifier.js.map

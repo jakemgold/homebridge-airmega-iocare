@@ -4,6 +4,37 @@ All notable changes to `homebridge-airmega-iocare` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Hardening pass driven by a full-source, multi-agent code review: twenty verified correctness fixes plus reliability and structure work. No new features.
+
+### Fixed
+- **Discovery can no longer delete your accessory over a server glitch.** A malformed-but-successful device-list response now fails discovery instead of reading as "zero devices", and the stale-accessory prune is skipped (with a warning) when Coway returns no purifiers while cached accessories exist. Unregistering destroys room assignments, scenes, and automations, so this path is now guarded on both ends.
+- **Discovery retries with backoff** instead of dying at boot on one transient failure, which previously left live-looking tiles whose controls silently did nothing until Homebridge was restarted. Rate-limit errors wait the full hour Coway asks for.
+- **Token refresh is single-flight.** Concurrent polls used to fire duplicate refresh requests carrying the same single-use refresh token roughly hourly, escalating to a full username/password re-login and occasionally storing an already-invalidated token pair.
+- **HTTP 429 fails fast.** A rate-limited poll used to fan out into as many as 10 requests in about 15 seconds; the next polling cycle is now the retry, per the plugin's own backoff rules.
+- **Network-level errors (timeouts, resets, DNS) are retried with backoff** like 5xx responses, everywhere including the login flow, which previously had no retry at all.
+- **Fan slider detents map to the intended speeds.** iOS writes the detents as 33.333/66.667, which the old integer thresholds pushed one speed high, making speed 1 unreachable from the slider.
+- **Dragging the slider to zero** no longer sends a stray speed-1 command to the just-powered-off unit.
+- **A pending debounced fan-speed write is cancelled** when a power, mode, or preset command is sent; it used to fire 250 ms later and knock the device back out of the mode the user just selected.
+- **Reported fan speeds above 3** (e.g. 250S Rapid) no longer push out-of-range RotationSpeed values every poll, and switching to Manual no longer re-sends them as invalid commands.
+- **Poll results that predate a user command are discarded**, so the Home app no longer flips back to pre-command state for up to a poll interval after a tap.
+- **A restructured state page fails the poll loudly** (keeping last known state) instead of silently presenting a running purifier as Off/Manual/speed-1.
+- **The per-poll endpoints recover from server-side token revocation** with the same refresh-and-retry the other endpoints had; filter-data failures now log a warning instead of silently blanking.
+- **Null or empty sensor readings stay unknown** instead of reading as 0, which fabricated pristine PM values and a synthesized 100% filter life.
+- **The 60-day password-change skip flow merges cookies across login steps.** Keycloak rotates session cookies mid-flow; replaying the originals could fail login in exactly the scenario the skip exists to survive.
+- **The Display Light switch is hidden on the 250S and IconS**, whose light register is inverted relative to the 400S semantics this plugin speaks; both reads and writes were backwards on those models.
+- **Exit-to-Auto on preset switch-off** now also works before the first successful poll.
+- **Sustained poll failures surface as warnings** (with a recovery notice) instead of staying at debug forever; power commands update the purifier's current-state indicator immediately; the cached firmware version survives restarts instead of resetting to 0.0.0.
+
+### Changed
+- **Air quality mapping.** Coway's four grades now map to Excellent / Fair / Inferior / Poor (previously Excellent / Good / Fair / Inferior). Coway "Unhealthy" no longer displays as the reassuring "Fair", and automations keyed on "Poor" can now fire; HomeKit's "Good" is intentionally skipped, which is harmless for rises-above/falls-below triggers. Existing air-quality automations effectively tighten by one notch.
+- **Filter life is cached for 30 minutes per device** (it changes on a scale of days), roughly halving the plugin's steady-state request volume against Coway.
+- **Filter rows are matched more defensively**: the Max2 row is matched by name when possible with the previous behavior as fallback, and unrecognized supply names are logged at debug so localized accounts can report the exact strings.
+
+### Internal
+- One shared HTTP helper now owns timeouts, response-size caps, and the retry policy for both the API client and the auth flow; the Coway register vocabulary lives in a single table consumed by both the read and write paths; GET and POST requests share one pipeline, so POST responses now get the same error-envelope checking GET always had; device serials are kept out of loggable URLs.
+
 ## [1.0.1] — 2026-06-30
 
 Config-schema fix required for Homebridge Verified. No functional or runtime change.

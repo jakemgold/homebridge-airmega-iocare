@@ -9,15 +9,11 @@ exports.refreshAccessToken = refreshAccessToken;
 const axios_1 = __importDefault(require("axios"));
 const url_1 = require("url");
 const endpoints_1 = require("./endpoints");
+const http_1 = require("./http");
 const redact_1 = require("./redact");
 // cowayaio reports the access token lifetime is 1 hour; we mirror that and
 // refresh proactively when the expiration is within 5 minutes.
 const ACCESS_TOKEN_TTL_MS = 60 * 60 * 1000;
-// Cap any single response we accept from Coway. The HTML scrape is the largest
-// legitimate response and runs ~50 KB; 2 MB gives a comfortable margin while
-// preventing a misbehaving or hostile response from OOM-ing the Homebridge
-// process via response-buffering inside axios.
-const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 // We extract URLs from HTML at two points in the login flow and then send
 // either the user's password (form action URL) or read an auth code (final
 // redirect URL) against them. Both URLs must live on a Coway host — anything
@@ -50,26 +46,23 @@ async function performLogin(params) {
     // log doesn't leak the full account email/phone.
     const maskedUser = (0, redact_1.maskEmail)(username);
     log.debug(`Coway: starting login for ${maskedUser}`);
-    const { loginActionUrl, cookies } = await fetchLoginPage();
+    const { loginActionUrl, cookies } = await fetchLoginPage(log);
     const authCode = await submitCredentials(loginActionUrl, cookies, params);
-    const tokens = await exchangeCodeForTokens(authCode);
+    const tokens = await exchangeCodeForTokens(authCode, log);
     log.debug(`Coway: login complete for ${maskedUser}`);
     return tokens;
 }
-async function refreshAccessToken(refreshToken) {
+async function refreshAccessToken(refreshToken, log) {
     const url = `${endpoints_1.Endpoint.BASE_URI}${endpoints_1.Endpoint.TOKEN_REFRESH}`;
-    const resp = await axios_1.default.post(url, { refreshToken }, {
+    const resp = await (0, http_1.withRetry)(() => axios_1.default.post(url, { refreshToken }, {
         headers: {
             'content-type': endpoints_1.Header.CONTENT_JSON,
             'accept': '*/*',
             'accept-language': endpoints_1.Header.COWAY_LANGUAGE,
             'user-agent': endpoints_1.Header.COWAY_USER_AGENT,
         },
-        timeout: 15000,
-        maxContentLength: MAX_RESPONSE_BYTES,
-        maxBodyLength: MAX_RESPONSE_BYTES,
-        validateStatus: () => true,
-    });
+        ...(0, http_1.baseRequestConfig)(),
+    }), log, 'token refresh');
     // Status-based mapping comes first. Without this, a 429 or 5xx falls through
     // to "no tokens in body" → AuthError → full username+password re-login in
     // forceRefresh, which hammers Coway exactly when it's already unhappy.
@@ -96,7 +89,7 @@ async function refreshAccessToken(refreshToken) {
     };
 }
 // --- helpers below ---
-async function fetchLoginPage() {
+async function fetchLoginPage(log) {
     const params = {
         auth_type: '0',
         response_type: 'code',
@@ -104,20 +97,22 @@ async function fetchLoginPage() {
         redirect_uri: endpoints_1.Endpoint.REDIRECT_URL,
         ui_locales: 'en',
     };
-    const resp = await axios_1.default.get(endpoints_1.Endpoint.OAUTH_URL, {
+    const resp = await (0, http_1.withRetry)(() => axios_1.default.get(endpoints_1.Endpoint.OAUTH_URL, {
         params,
         headers: {
             'user-agent': endpoints_1.Header.USER_AGENT,
             'accept': endpoints_1.Header.ACCEPT,
             'accept-language': endpoints_1.Header.ACCEPT_LANG,
         },
-        timeout: 15000,
-        maxContentLength: MAX_RESPONSE_BYTES,
-        maxBodyLength: MAX_RESPONSE_BYTES,
-        validateStatus: () => true,
-    });
+        ...(0, http_1.baseRequestConfig)(),
+    }), log, 'login page');
     if (resp.status === 503) {
         throw new Error('Coway servers are undergoing maintenance.');
+    }
+    if (resp.status === 429) {
+        // Typed so discovery's retry loop backs off the full hour instead of
+        // its normal cadence.
+        throw new RateLimitedError('Coway rate-limited on login page: HTTP 429. Wait at least an hour before retrying.');
     }
     if (resp.status !== 200) {
         throw new Error(`Coway login page fetch failed: HTTP ${resp.status}`);
@@ -142,19 +137,30 @@ async function submitCredentials(actionUrl, cookies, params) {
         password: params.password,
         rememberMe: 'on',
     }).toString();
-    const resp = await axios_1.default.post(actionUrl, formBody, {
+    const resp = await (0, http_1.withRetry)(() => axios_1.default.post(actionUrl, formBody, {
         headers: {
             'content-type': 'application/x-www-form-urlencoded',
             'user-agent': endpoints_1.Header.USER_AGENT,
             'cookie': cookies,
         },
-        timeout: 15000,
         maxRedirects: 5,
-        maxContentLength: MAX_RESPONSE_BYTES,
-        maxBodyLength: MAX_RESPONSE_BYTES,
-        validateStatus: () => true,
-    });
-    return await handleAuthResponse(resp, cookies, params);
+        ...(0, http_1.baseRequestConfig)(),
+    }), params.log, 'credentials submit');
+    // Map only rate-limit and server errors here; 4xx pages still carry HTML
+    // that handleAuthResponse turns into friendlier errors (bad credentials,
+    // password-change prompt).
+    if (resp.status === 429) {
+        throw new RateLimitedError('Coway rate-limited on credentials submit: HTTP 429. Wait at least an hour before retrying.');
+    }
+    if (resp.status >= 500) {
+        throw new Error(`Coway credentials submit failed: HTTP ${resp.status}`);
+    }
+    // Merge Set-Cookie from this response over the login-page cookies before
+    // any follow-up POST. Keycloak can rotate its session cookies between login
+    // steps; replaying only the original cookie string on the password-skip
+    // form gets an expired-page response instead of the bridge redirect. The
+    // reference implementation gets this for free from its session cookie jar.
+    return await handleAuthResponse(resp, mergeCookies(cookies, resp), params);
 }
 async function handleAuthResponse(resp, cookies, params) {
     const finalPath = readFinalPath(resp);
@@ -199,34 +205,36 @@ async function submitPasswordSkip(passwordChangeHtml, cookies, params) {
         new_password: '',
         new_password_confirm: '',
     }).toString();
-    const resp = await axios_1.default.post(skipActionUrl, formBody, {
+    const resp = await (0, http_1.withRetry)(() => axios_1.default.post(skipActionUrl, formBody, {
         headers: {
             'content-type': 'application/x-www-form-urlencoded',
             'user-agent': endpoints_1.Header.USER_AGENT,
             'cookie': cookies,
         },
-        timeout: 15000,
         maxRedirects: 5,
-        maxContentLength: MAX_RESPONSE_BYTES,
-        maxBodyLength: MAX_RESPONSE_BYTES,
-        validateStatus: () => true,
-    });
+        ...(0, http_1.baseRequestConfig)(),
+    }), params.log, 'password-skip submit');
     // After skipping we expect the bridge redirect with a code.
-    return await handleAuthResponse(resp, cookies, { ...params, skipPasswordChange: false });
+    return await handleAuthResponse(resp, mergeCookies(cookies, resp), { ...params, skipPasswordChange: false });
 }
-async function exchangeCodeForTokens(authCode) {
+async function exchangeCodeForTokens(authCode, log) {
     const url = `${endpoints_1.Endpoint.BASE_URI}${endpoints_1.Endpoint.GET_TOKEN}`;
-    const resp = await axios_1.default.post(url, { authCode, redirectUrl: endpoints_1.Endpoint.REDIRECT_URL }, {
+    const resp = await (0, http_1.withRetry)(() => axios_1.default.post(url, { authCode, redirectUrl: endpoints_1.Endpoint.REDIRECT_URL }, {
         headers: {
             'content-type': endpoints_1.Header.CONTENT_JSON,
             'user-agent': endpoints_1.Header.COWAY_USER_AGENT,
             'accept-language': endpoints_1.Header.COWAY_LANGUAGE,
         },
-        timeout: 15000,
-        maxContentLength: MAX_RESPONSE_BYTES,
-        maxBodyLength: MAX_RESPONSE_BYTES,
-        validateStatus: () => true,
-    });
+        ...(0, http_1.baseRequestConfig)(),
+    }), log, 'token exchange');
+    // Status-based mapping before body parsing, same rationale as the refresh
+    // endpoint above: a 429/5xx must not fall through to a generic AuthError.
+    if (resp.status === 429) {
+        throw new RateLimitedError('Coway rate-limited on token exchange: HTTP 429. Wait at least an hour before retrying.');
+    }
+    if (resp.status >= 500) {
+        throw new Error(`Coway server error on token exchange: HTTP ${resp.status}`);
+    }
     const body = resp.data;
     if (body?.error?.message === endpoints_1.ErrorMessage.INVALID_GRANT) {
         throw new RateLimitedError('Coway token endpoint returned invalid_grant. The account may be temporarily ' +
@@ -319,6 +327,31 @@ function collectCookies(resp) {
         .map(line => String(line).split(';')[0].trim())
         .filter(s => s.length > 0)
         .join('; ');
+}
+/**
+ * Merge Set-Cookie values from `resp` over an existing cookie string, with
+ * the response's values winning on name collisions. This stands in for the
+ * session cookie jar the reference implementation uses: without it, cookies
+ * Keycloak rotates mid-flow (session IDs between the credentials POST and
+ * the password-skip POST) would be replayed stale. Cookies set on
+ * intermediate redirect hops are still invisible here — axios only exposes
+ * the final response's headers — but the final hop is where Keycloak sets
+ * the ones the next form POST needs.
+ */
+function mergeCookies(base, resp) {
+    const fresh = collectCookies(resp);
+    if (!fresh)
+        return base;
+    if (!base)
+        return fresh;
+    const jar = new Map();
+    for (const part of `${base}; ${fresh}`.split(';')) {
+        const eq = part.indexOf('=');
+        if (eq <= 0)
+            continue;
+        jar.set(part.slice(0, eq).trim(), part.slice(eq + 1).trim());
+    }
+    return [...jar.entries()].map(([k, v]) => `${k}=${v}`).join('; ');
 }
 function escapeRegex(s) {
     return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

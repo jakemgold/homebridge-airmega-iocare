@@ -20,6 +20,8 @@ export declare class AirPurifierAccessory {
     private pollHandle?;
     private presetExitHandle?;
     private refreshing;
+    private commandEpoch;
+    private consecutivePollFailures;
     constructor(platform: AirmegaPlatform, accessory: PlatformAccessory, pollingInterval: number);
     private handlePowerSet;
     private handleTargetStateSet;
@@ -35,8 +37,16 @@ export declare class AirPurifierAccessory {
      * leave it alone. Any of those user actions also cancels the timer outright.
      */
     private schedulePresetExit;
+    private exitPresetToAuto;
     private handleLightSet;
     private startPolling;
+    /**
+     * Log a poll failure. One-off failures are routine (a 5xx, a timeout) and
+     * stay at debug; a streak means HomeKit is serving stale state with no
+     * user-visible signal, so escalate to warn at the threshold and re-warn
+     * periodically for the duration of the outage.
+     */
+    private notePollFailure;
     private refresh;
     private pushUpdates;
     /**

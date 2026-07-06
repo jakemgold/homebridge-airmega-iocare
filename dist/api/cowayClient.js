@@ -7,26 +7,25 @@ exports.CowayClient = void 0;
 const axios_1 = __importDefault(require("axios"));
 const auth_1 = require("./auth");
 const endpoints_1 = require("./endpoints");
+const http_1 = require("./http");
 const redact_1 = require("./redact");
 // Refresh proactively when the token has under 5 minutes of life left,
 // matching cowayaio's behavior.
 const REFRESH_LEAD_MS = 5 * 60 * 1000;
-// Cap any single response we accept from Coway. The HTML scrape is the largest
-// legitimate response (~50 KB live), so 2 MB gives a comfortable margin while
-// preventing a misbehaving or hostile response from OOM-ing the Homebridge
-// process via axios's response buffer.
-const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
-// Retry parameters for transient server-side failures (5xx) and rate-limit
-// responses (429). Cap at 5 attempts per HANDOFF.md — beyond that, surface a
-// warn-level log and let the next polling cycle naturally retry.
-const RETRY_MAX_ATTEMPTS = 5;
-const RETRY_INITIAL_DELAY_MS = 1000;
-const RETRY_MAX_DELAY_MS = 16000;
+// Filter life changes on a scale of days; fetching /supplies on every poll
+// doubled the plugin's steady-state request volume against a rate-limit-
+// sensitive API. Cache per device and refetch on this cadence instead. Error
+// results are cached too — a persistent supplies outage should not revert to
+// per-poll hammering.
+const SUPPLIES_TTL_MS = 30 * 60 * 1000;
 class CowayClient {
     opts;
     tokens;
     countryCode;
     places = [];
+    // In-flight token refresh, shared by every concurrent caller — see forceRefresh.
+    refreshInFlight;
+    suppliesCache = new Map();
     constructor(opts) {
         this.opts = opts;
     }
@@ -85,7 +84,7 @@ class CowayClient {
         }
         const [purifierJson, supplies] = await Promise.all([
             this.fetchPurifierJson(device),
-            this.fetchSupplies(device),
+            this.getSupplies(device),
         ]);
         // If we couldn't extract anything from the HTML, fail the poll instead of
         // assembling state from empty objects. The caller catches and HomeKit
@@ -95,11 +94,20 @@ class CowayClient {
             throw new Error(`Coway: could not extract purifier state from HTML for ${device.name}`);
         }
         const purifierInfo = findFirstObject(purifierJson?.children) ?? {};
-        const status = readPath(purifierInfo, 'deviceStatusData.data.statusInfo.attributes') ?? {};
+        const status = readPath(purifierInfo, 'deviceStatusData.data.statusInfo.attributes');
+        // A page that parses but whose inner structure moved (or whose first
+        // `children` entry stops being the payload) would otherwise fall through
+        // to an all-defaults state — power off, manual, speed 1 — that
+        // pushUpdates would present as authoritative. Fail the poll instead:
+        // same keep-last-known-state behavior as the unparseable case above,
+        // and loud in the logs instead of silently lying about the device.
+        if (!status || Object.keys(status).length === 0) {
+            throw new Error(`Coway: purifier page for ${device.name} is missing statusInfo attributes`);
+        }
         const sensors = findSensorAttributes(purifierInfo);
         const aqGrade = readPath(purifierInfo, 'deviceModule.data.content.deviceModuleDetailInfo.airStatusInfo');
         const mcuVersion = findMcuVersion(purifierInfo);
-        return assembleDeviceState(status, sensors, aqGrade, supplies, mcuVersion);
+        return assembleDeviceState(status, sensors, aqGrade, supplies, mcuVersion, this.opts.log);
     }
     /**
      * Send a single Coway control attribute write to the device.
@@ -116,7 +124,11 @@ class CowayClient {
             isMultiControl: false,
             refreshFlag: false,
         };
-        const body = await this.authedJsonPost(url, payload);
+        // Pass a context label instead of the URL: the control-status URL embeds
+        // the device serial, and retry/error messages surface in warn-level logs
+        // that users paste into GitHub issues. redact.ts strips serials from
+        // logged bodies; the label keeps them out of logged URLs too.
+        const body = await this.authedJsonPost(url, payload, `control-status for ${device.name}`);
         // control-status uses a `header.error_code` envelope for app-level failures
         // (e.g. device offline). HTTP-level failures are already mapped to thrown
         // errors inside authedJsonPost.
@@ -130,7 +142,8 @@ class CowayClient {
     async fetchPurifierJson(device) {
         await this.ensureFreshToken();
         const url = `${endpoints_1.Endpoint.PURIFIER_HTML_BASE}/${device.placeId}/product/${device.modelCode}`;
-        const resp = await withRetry(() => axios_1.default.get(url, {
+        const context = `purifier HTML for ${device.name}`;
+        const doFetch = () => (0, http_1.withRetry)(() => axios_1.default.get(url, {
             headers: {
                 'theme': endpoints_1.Header.THEME,
                 'callingpage': endpoints_1.Header.CALLING_PAGE,
@@ -142,7 +155,7 @@ class CowayClient {
                 // the standard Authorization Bearer. Verified against cowayaio.
                 'accesstoken': this.tokens.accessToken,
                 'accept-language': endpoints_1.Header.COWAY_LANGUAGE,
-                'region': 'NUS',
+                'region': endpoints_1.Header.REGION,
                 'user-agent': endpoints_1.Header.HTML_USER_AGENT,
                 'srcpath': endpoints_1.Header.SOURCE_PATH,
                 'deviceserial': device.deviceId,
@@ -154,25 +167,48 @@ class CowayClient {
                 weightUnit: 'oz',
                 gravityUnit: 'lb',
             },
-            timeout: 15000,
-            maxContentLength: MAX_RESPONSE_BYTES,
-            maxBodyLength: MAX_RESPONSE_BYTES,
-            validateStatus: () => true,
+            ...(0, http_1.baseRequestConfig)(),
             // The endpoint returns HTML; axios shouldn't try to parse JSON.
             responseType: 'text',
             transformResponse: [d => d],
-        }), this.opts.log, `purifier HTML for ${device.name}`);
-        if (resp.status !== 200 || typeof resp.data !== 'string') {
-            throw new Error(`Coway purifier HTML fetch failed for ${device.name}: HTTP ${resp.status}`);
+        }), this.opts.log, context);
+        let resp = await doFetch();
+        if (resp.status === 401) {
+            // Coway can revoke tokens server-side ahead of our locally computed
+            // expiry (IoCare+ login elsewhere, session purge). Without this
+            // one-shot refresh-and-retry — the same recovery authedJsonGet has —
+            // every poll would fail for up to ~55 minutes until the proactive
+            // refresh window opens, while commands kept working and masked it.
+            await this.forceRefresh();
+            resp = await doFetch();
+        }
+        this.assertResponseOk(resp, context);
+        if (typeof resp.data !== 'string') {
+            throw new Error(`Coway purifier HTML fetch failed for ${device.name}: non-text response`);
         }
         return extractPurifierJsonFromHtml(resp.data);
     }
+    /**
+     * Supplies (filter life), served from a per-device cache with a 30-minute
+     * TTL — see SUPPLIES_TTL_MS. Polls between refreshes reuse the cached
+     * entries; the HTML scrape still runs every poll for live state.
+     */
+    async getSupplies(device) {
+        const cached = this.suppliesCache.get(device.deviceId);
+        if (cached && Date.now() - cached.fetchedAt < SUPPLIES_TTL_MS) {
+            return cached.entries;
+        }
+        const entries = await this.fetchSupplies(device);
+        this.suppliesCache.set(device.deviceId, { fetchedAt: Date.now(), entries });
+        return entries;
+    }
     async fetchSupplies(device) {
         const url = `${endpoints_1.Endpoint.SECONDARY_BASE}${endpoints_1.Endpoint.PLACES}/${device.placeId}/devices/${device.deviceId}/supplies`;
+        const context = `supplies for ${device.name}`;
         await this.ensureFreshToken();
-        const resp = await withRetry(() => axios_1.default.get(url, {
+        const doFetch = () => (0, http_1.withRetry)(() => axios_1.default.get(url, {
             headers: {
-                'region': 'NUS',
+                'region': endpoints_1.Header.REGION,
                 'accept': 'application/json, text/plain, */*',
                 'authorization': `Bearer ${this.tokens.accessToken}`,
                 'accept-language': endpoints_1.Header.COWAY_LANGUAGE,
@@ -183,11 +219,28 @@ class CowayClient {
                 membershipType: '',
                 langCd: endpoints_1.Header.ACCEPT_LANG,
             },
-            timeout: 15000,
-            maxContentLength: MAX_RESPONSE_BYTES,
-            maxBodyLength: MAX_RESPONSE_BYTES,
-            validateStatus: () => true,
-        }), this.opts.log, `supplies for ${device.name}`);
+            ...(0, http_1.baseRequestConfig)(),
+        }), this.opts.log, context);
+        let resp = await doFetch();
+        if (resp.status === 401) {
+            // Same one-shot refresh-and-retry as fetchPurifierJson: don't let a
+            // server-side token revocation silently blank the filter data.
+            await this.forceRefresh();
+            resp = await doFetch();
+        }
+        if (resp.status === 429) {
+            // Rate limiting is account-wide, not endpoint-specific: surface the
+            // typed error instead of degrading quietly.
+            this.assertResponseOk(resp, context);
+        }
+        if (resp.status < 200 || resp.status >= 300) {
+            // Filter life is the least critical part of a poll and changes over
+            // days: degrade to the sensor-derived fallback (and HomeKit's last
+            // known values) rather than failing the whole poll — but say so.
+            // Silently coercing errors to an empty list hid real outages before.
+            this.opts.log.warn(`Coway ${context}: HTTP ${resp.status}; keeping last known filter state.`);
+            return [];
+        }
         const list = resp.data?.data?.suppliesList;
         return Array.isArray(list) ? list : [];
     }
@@ -236,7 +289,15 @@ class CowayClient {
             pageSize: '100',
         });
         const devices = body?.data?.content;
-        const rows = Array.isArray(devices) ? devices : [];
+        // Throw on a malformed shape rather than coercing to an empty list, the
+        // same way fetchPlaces does. The downstream consumer is destructive: a
+        // devices list that comes back empty because of an envelope change would
+        // make platform.ts unregister the user's cached accessories, taking their
+        // room assignments and automations with it.
+        if (!Array.isArray(devices)) {
+            throw new Error(`Coway /com/places/${placeId}/devices returned no content (body=${(0, redact_1.redactBody)(body)})`);
+        }
+        const rows = devices;
         // Diagnostic dump of the raw rows so accounts where discovery comes up empty
         // can show us exactly what Coway returns (issue #6). Serials, place names,
         // and other sensitive keys are stripped by redactBody before logging.
@@ -244,98 +305,110 @@ class CowayClient {
         return rows;
     }
     /**
-     * GET a JSON endpoint with the standard authorized headers, refreshing the
-     * access token first if it's close to expiry. On a 401 we attempt one
-     * refresh-and-retry before giving up. 5xx and 429 responses get the
-     * standard exponential-backoff retry loop.
+     * The shared pipeline for every authorized JSON call: token freshness
+     * check, exponential backoff on 5xx and network errors (429 fails fast to
+     * RateLimitedError — see http.ts), a one-shot 401 refresh-and-retry,
+     * HTTP-status-to-exception mapping, and Coway's body.error envelope
+     * mapping. GET and POST are thin wrappers over this one implementation so
+     * their error handling can't drift — it previously did: POST passed
+     * body.error envelopes through silently where GET threw.
+     *
+     * Returns the parsed body when it's a JSON object, undefined otherwise
+     * (control-status sometimes responds with no body).
+     *
+     * `context` labels log and error messages; pass one when the URL embeds a
+     * device serial so the serial stays out of shareable logs.
      */
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    async authedJsonGet(url, params) {
+    // `any` because Coway's response envelopes differ per endpoint and carry no
+    // schema; callers destructure what they need behind optional chaining.
+    async authedJsonRequest(method, url, opts = {}) {
+        const context = opts.context ?? url;
         await this.ensureFreshToken();
         const buildCfg = () => ({
             headers: this.authHeaders(),
-            params,
-            timeout: 15000,
-            maxContentLength: MAX_RESPONSE_BYTES,
-            maxBodyLength: MAX_RESPONSE_BYTES,
-            validateStatus: () => true,
+            params: opts.params,
+            ...(0, http_1.baseRequestConfig)(),
         });
-        let resp = await withRetry(() => axios_1.default.get(url, buildCfg()), this.opts.log, url);
+        const doRequest = () => (0, http_1.withRetry)(() => (method === 'get'
+            ? axios_1.default.get(url, buildCfg())
+            : axios_1.default.post(url, opts.payload, buildCfg())), this.opts.log, context);
+        let resp = await doRequest();
         if (resp.status === 401) {
             await this.forceRefresh();
-            resp = await withRetry(() => axios_1.default.get(url, buildCfg()), this.opts.log, url);
+            resp = await doRequest();
         }
-        return this.parseJsonResponse(resp, url);
+        this.assertResponseOk(resp, context);
+        const body = resp.data;
+        if (!body || typeof body !== 'object') {
+            return undefined;
+        }
+        this.assertNoErrorEnvelope(body, context);
+        return body;
     }
     /**
-     * POST a JSON body with the standard authorized headers. Mirrors
-     * `authedJsonGet`: token freshness check, exponential backoff on 5xx/429,
-     * one-shot 401 retry after refresh, and HTTP-status-to-exception mapping.
-     * Returns the parsed body if it's a JSON object, or undefined if the
-     * endpoint responded with no body (control-status sometimes does). Control
-     * writes are idempotent at the value level (setting fan_speed=2 twice is a
-     * no-op), so retrying is safe.
+     * GET a JSON endpoint. Coway's GET endpoints always return a JSON object,
+     * so unlike POST, a missing or non-object body is an error here.
      */
+    // `any` for the same reason as authedJsonRequest.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    async authedJsonPost(url, payload) {
-        await this.ensureFreshToken();
-        const buildCfg = () => ({
-            headers: this.authHeaders(),
-            timeout: 15000,
-            maxContentLength: MAX_RESPONSE_BYTES,
-            maxBodyLength: MAX_RESPONSE_BYTES,
-            validateStatus: () => true,
-        });
-        let resp = await withRetry(() => axios_1.default.post(url, payload, buildCfg()), this.opts.log, url);
-        if (resp.status === 401) {
-            await this.forceRefresh();
-            resp = await withRetry(() => axios_1.default.post(url, payload, buildCfg()), this.opts.log, url);
+    async authedJsonGet(url, params) {
+        const body = await this.authedJsonRequest('get', url, { params });
+        if (body === undefined) {
+            throw new Error(`Coway returned non-JSON for ${url}`);
         }
-        this.assertResponseOk(resp, url);
-        const body = resp.data;
-        return body && typeof body === 'object' ? body : undefined;
+        return body;
+    }
+    /**
+     * POST a JSON body. Tolerates an empty response body. Retrying inside the
+     * pipeline is safe for control writes: they're idempotent at the value
+     * level (setting fan_speed=2 twice is a no-op).
+     */
+    // `any` for the same reason as authedJsonRequest.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    async authedJsonPost(url, payload, context = url) {
+        return this.authedJsonRequest('post', url, { payload, context });
     }
     /**
      * Map HTTP status codes to thrown exceptions. Status-based mapping comes
      * before any body parsing so we don't depend on matching Coway's localized
-     * message strings to recognize a 401 or 429.
+     * message strings to recognize a 401 or 429. `context` is a URL or a
+     * descriptive label — callers pass a label when the URL embeds a serial.
      */
-    assertResponseOk(resp, url) {
+    assertResponseOk(resp, context) {
         if (resp.status === 401) {
-            throw new auth_1.AuthError(`Coway auth error on ${url}: HTTP 401`);
+            throw new auth_1.AuthError(`Coway auth error on ${context}: HTTP 401`);
         }
         if (resp.status === 429) {
-            throw new auth_1.RateLimitedError(`Coway rate-limited on ${url}: HTTP 429. Wait at least an hour before retrying.`);
+            throw new auth_1.RateLimitedError(`Coway rate-limited on ${context}: HTTP 429. Wait at least an hour before retrying.`);
         }
         if (resp.status >= 500) {
-            throw new Error(`Coway server error on ${url}: HTTP ${resp.status}`);
+            throw new Error(`Coway server error on ${context}: HTTP ${resp.status}`);
         }
         if (resp.status < 200 || resp.status >= 300) {
-            throw new Error(`Coway unexpected status on ${url}: HTTP ${resp.status}`);
+            throw new Error(`Coway unexpected status on ${context}: HTTP ${resp.status}`);
         }
     }
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    parseJsonResponse(resp, url) {
-        this.assertResponseOk(resp, url);
-        const body = resp.data;
-        if (!body || typeof body !== 'object') {
-            throw new Error(`Coway returned non-JSON for ${url}`);
+    /**
+     * Coway wraps application-level failures in a body.error envelope, even on
+     * HTTP 200. Map the token-related messages to AuthError so the refresh and
+     * re-login machinery reacts; anything else is a plain error.
+     */
+    assertNoErrorEnvelope(body, context) {
+        if (!body.error) {
+            return;
         }
-        if (body.error) {
-            const message = body.error?.message ?? (0, redact_1.redactBody)(body.error);
-            if (message === endpoints_1.ErrorMessage.INVALID_REFRESH_TOKEN || message === endpoints_1.ErrorMessage.BAD_TOKEN) {
-                throw new auth_1.AuthError(`Coway auth error on ${url}: ${message}`);
-            }
-            throw new Error(`Coway error on ${url}: ${message}`);
+        const message = body.error?.message ?? (0, redact_1.redactBody)(body.error);
+        if (message === endpoints_1.ErrorMessage.INVALID_REFRESH_TOKEN || message === endpoints_1.ErrorMessage.BAD_TOKEN) {
+            throw new auth_1.AuthError(`Coway auth error on ${context}: ${message}`);
         }
-        return body;
+        throw new Error(`Coway error on ${context}: ${message}`);
     }
     authHeaders() {
         if (!this.tokens?.accessToken) {
             throw new Error('CowayClient: missing access token');
         }
         return {
-            'region': 'NUS',
+            'region': endpoints_1.Header.REGION,
             'content-type': endpoints_1.Header.CONTENT_JSON,
             'accept': '*/*',
             'authorization': `Bearer ${this.tokens.accessToken}`,
@@ -351,13 +424,31 @@ class CowayClient {
             await this.forceRefresh();
         }
     }
-    async forceRefresh() {
+    /**
+     * Refresh the tokens, sharing one in-flight refresh among all concurrent
+     * callers. getDeviceState fetches two endpoints in parallel and multiple
+     * accessories poll one shared client, so without single-flight every
+     * refresh window fired duplicate simultaneous refresh POSTs carrying the
+     * SAME refresh token — and Coway rotates refresh tokens on use, so the
+     * losing request got INVALID_REFRESH_TOKEN and escalated to a full
+     * username+password re-login (and last-writer-wins on this.tokens could
+     * store an already-invalidated pair).
+     */
+    forceRefresh() {
+        if (!this.refreshInFlight) {
+            this.refreshInFlight = this.doRefresh().finally(() => {
+                this.refreshInFlight = undefined;
+            });
+        }
+        return this.refreshInFlight;
+    }
+    async doRefresh() {
         if (!this.tokens?.refreshToken) {
             throw new Error('CowayClient: cannot refresh without a refresh token');
         }
         this.opts.log.debug('Coway: refreshing access token');
         try {
-            this.tokens = await (0, auth_1.refreshAccessToken)(this.tokens.refreshToken);
+            this.tokens = await (0, auth_1.refreshAccessToken)(this.tokens.refreshToken, this.opts.log);
         }
         catch (err) {
             if (err instanceof auth_1.AuthError) {
@@ -375,44 +466,6 @@ class CowayClient {
     }
 }
 exports.CowayClient = CowayClient;
-// --- Retry helper ---
-/**
- * Run an axios call with exponential backoff on transient failures
- * (5xx and 429). Stops after RETRY_MAX_ATTEMPTS or as soon as the response
- * looks final (anything else, including 4xx auth errors). The caller still
- * gets the last response if every attempt failed — they decide whether to
- * propagate that as an exception.
- */
-async function withRetry(attempt, log, context) {
-    let delay = RETRY_INITIAL_DELAY_MS;
-    let last;
-    for (let i = 1; i <= RETRY_MAX_ATTEMPTS; i++) {
-        last = await attempt();
-        if (!isRetryableStatus(last.status)) {
-            if (i > 1) {
-                log.debug(`Coway ${context}: succeeded after ${i} attempt(s).`);
-            }
-            return last;
-        }
-        if (i === RETRY_MAX_ATTEMPTS)
-            break;
-        // Add jitter so multiple devices polling on the same interval don't all
-        // re-hit Coway in lockstep when it returns a 5xx wave.
-        const jitter = Math.random() * 500;
-        log.debug(`Coway ${context}: HTTP ${last.status}, retrying in ${Math.round((delay + jitter) / 100) / 10}s ` +
-            `(attempt ${i + 1}/${RETRY_MAX_ATTEMPTS}).`);
-        await sleep(delay + jitter);
-        delay = Math.min(delay * 2, RETRY_MAX_DELAY_MS);
-    }
-    log.warn(`Coway ${context}: gave up after ${RETRY_MAX_ATTEMPTS} attempts (last status ${last.status}).`);
-    return last;
-}
-function isRetryableStatus(status) {
-    return status === 429 || (status >= 500 && status <= 599);
-}
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
 /**
  * The Airmega state HTML has a single <script> tag whose body contains the
  * product page's full JSON state model. cowayaio targets it via
@@ -487,6 +540,8 @@ function findFirstObject(arr) {
 function readPath(obj, path) {
     if (!obj)
         return undefined;
+    // `any` because the walk crosses untyped scraped JSON; the guard below
+    // re-checks the shape at every step.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let cur = obj;
     for (const key of path.split('.')) {
@@ -527,21 +582,34 @@ function findMcuVersion(purifierInfo) {
     }
     return undefined;
 }
+// The status block reports the mode register numerically; compare via
+// String() against the shared command-value table so read and write can't
+// disagree about what each register value means.
 function modeFromRegister(value) {
-    switch (value) {
-        case 1: return 'auto';
-        case 2: return 'night';
-        case 5: return 'rapid';
-        case 6: return 'eco';
+    switch (String(value)) {
+        case endpoints_1.ModeValue.AUTO: return 'auto';
+        case endpoints_1.ModeValue.NIGHT: return 'night';
+        case endpoints_1.ModeValue.RAPID: return 'rapid';
+        case endpoints_1.ModeValue.ECO: return 'eco';
         default: return 'manual';
     }
 }
+// Coway's four grades onto HomeKit's five levels, keeping both endpoints
+// reachable and skipping HomeKit "Good". The old 1:1 mapping ran one notch
+// optimistic everywhere — Coway "Unhealthy" rendered as "Fair" and "Poor"
+// was unreachable, so worst-case automations could never fire. See the
+// AirQualityLevel comment in types.ts for the full rationale.
 function aqLevelFromGrade(grade) {
-    if (grade === 1 || grade === 2 || grade === 3 || grade === 4)
-        return grade;
-    // 0 = HomeKit "Unknown". Don't default to 1 (Excellent) on missing data —
-    // that lies about state in exactly the way the filter-default fix avoids.
-    return 0;
+    switch (grade) {
+        case 1: return 1; // Coway "Good" (its cleanest grade) → Excellent
+        case 2: return 3; // Coway "Moderate" → Fair
+        case 3: return 4; // Coway "Unhealthy" → Inferior
+        case 4: return 5; // Coway "Very Unhealthy" → Poor
+        default:
+            // 0 = HomeKit "Unknown". Don't default to Excellent on missing data —
+            // that lies about state in exactly the way the filter-default fix avoids.
+            return 0;
+    }
 }
 function clampFanSpeed(v) {
     const n = Number(v);
@@ -551,31 +619,53 @@ function clampFanSpeed(v) {
 }
 function pickNumber(...vals) {
     for (const v of vals) {
+        // Number(null) and Number('') are both 0 — an absent reading must stay
+        // undefined, not read as a legitimate zero. A synthesized 0 here becomes
+        // "pristine air" for PM values and a fake 100% for the sensor-derived
+        // filter percentage.
+        if (v == null || v === '')
+            continue;
         const n = Number(v);
         if (Number.isFinite(n))
             return n;
     }
     return undefined;
 }
-function assembleDeviceState(status, sensors, aqGrade, supplies, mcuVersion) {
-    const power = status['0001'] === 1;
-    const mode = modeFromRegister(status['0002']);
-    const fanSpeed = clampFanSpeed(status['0003']);
-    // 400S binary light: 0=off, 2=on. Other models use the same register but with
-    // different value semantics; for v1 we only target the 400S.
-    const lightOn = status['0007'] === 2;
-    const timerMinutesRemaining = pickNumber(status['0008']);
+function assembleDeviceState(status, sensors, aqGrade, supplies, mcuVersion, log) {
+    const power = String(status[endpoints_1.Attribute.POWER]) === endpoints_1.PowerValue.ON;
+    const mode = modeFromRegister(status[endpoints_1.Attribute.MODE]);
+    const fanSpeed = clampFanSpeed(status[endpoints_1.Attribute.FAN_SPEED]);
+    // 400S-family binary light semantics; models with the inverted multi-mode
+    // register (250S/IconS) don't expose the switch — see LIGHT_SWITCH_MODELS.
+    const lightOn = String(status[endpoints_1.Attribute.LIGHT]) === endpoints_1.LightMode.ON;
+    const timerMinutesRemaining = pickNumber(status[endpoints_1.Attribute.TIMER]);
     // Filter percentages: prefer the /supplies endpoint (canonical), fall back to
     // a sensor-derived "100 - usedPct" if Coway hasn't populated supplies yet
     // (the 250S endpoint is still under development per cowayaio comments).
+    //
+    // Row matching: 'Pre-Filter' is the literal the live API returns (cowayaio
+    // matches the same string). The Max2 row is matched positively on its name
+    // when possible, with "any other row" as the fallback — the fallback
+    // reproduces the reference behavior exactly, while the positive match
+    // protects against a localized pre-filter name or an extra supply row
+    // cross-labeling the two filters.
     const preFilterEntry = supplies.find(s => s.supplyNm === 'Pre-Filter');
-    const max2Entry = supplies.find(s => s.supplyNm !== 'Pre-Filter');
+    const max2Entry = supplies.find(s => /max2/i.test(s.supplyNm ?? ''))
+        ?? supplies.find(s => s !== preFilterEntry);
+    if (supplies.length > 0 && !preFilterEntry) {
+        // A populated list with no recognizable pre-filter row means Coway is
+        // returning names we don't know (likely localized). Log them — filter
+        // display names aren't sensitive — so an affected user's debug log hands
+        // us the exact strings to match.
+        log.debug('Coway: no \'Pre-Filter\' row among supplies names: ' +
+            supplies.map(s => JSON.stringify(s.supplyNm ?? '?')).join(', '));
+    }
     const preFilterPct = preFilterEntry?.filterRemain
-        ?? sensorDerivedFilterPct(sensors, '0011');
+        ?? sensorDerivedFilterPct(sensors, endpoints_1.SensorKey.PRE_FILTER_USED_PCT);
     const max2FilterPct = max2Entry?.filterRemain
-        ?? sensorDerivedFilterPct(sensors, '0012');
-    const pm25 = pickNumber(sensors['0001'], sensors.PM25_IDX);
-    const pm10 = pickNumber(sensors['0002'], sensors.PM10_IDX);
+        ?? sensorDerivedFilterPct(sensors, endpoints_1.SensorKey.MAX2_FILTER_USED_PCT);
+    const pm25 = pickNumber(sensors[endpoints_1.SensorKey.PM25], sensors[endpoints_1.SensorKey.PM25_IDX]);
+    const pm10 = pickNumber(sensors[endpoints_1.SensorKey.PM10], sensors[endpoints_1.SensorKey.PM10_IDX]);
     const airQuality = aqLevelFromGrade(aqGrade?.iaqGrade);
     return {
         power,
