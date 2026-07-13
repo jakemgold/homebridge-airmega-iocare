@@ -9,6 +9,9 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/homebridge/homebridge/wiki/Verified-Plugins">
+    <img alt="verified-by-homebridge" src="https://img.shields.io/badge/homebridge-verified-blueviolet?color=%23491F59&style=flat">
+  </a>
   <a href="https://www.npmjs.com/package/homebridge-airmega-iocare">
     <img alt="npm" src="https://img.shields.io/npm/v/homebridge-airmega-iocare.svg?color=blue">
   </a>
