@@ -140,19 +140,19 @@ export class AirPurifierAccessory {
 
     this.purifier.getCharacteristic(C.Active)
       .onGet(() => this.state?.power ? 1 : 0)
-      .onSet(v => this.handlePowerSet(v));
+      .onSet(this.guardCommand('power', v => this.handlePowerSet(v)));
 
     this.purifier.getCharacteristic(C.CurrentAirPurifierState)
       .onGet(() => this.state?.power ? 2 : 0); // 2 = purifying, 0 = inactive
 
     this.purifier.getCharacteristic(C.TargetAirPurifierState)
       .onGet(() => this.isAutoForUser(this.state?.mode) ? 1 : 0)
-      .onSet(v => this.handleTargetStateSet(v));
+      .onSet(this.guardCommand('mode', v => this.handleTargetStateSet(v)));
 
     this.purifier.getCharacteristic(C.RotationSpeed)
       .setProps({ minStep: 100 / 3 })
       .onGet(() => this.fanSpeedToHomeKit(this.state?.fanSpeed ?? 1))
-      .onSet(v => this.handleRotationSpeedSet(v));
+      .onSet(this.guardCommand('fan speed', v => this.handleRotationSpeedSet(v)));
 
     this.airQuality = accessory.getService(S.AirQualitySensor)
       ?? accessory.addService(S.AirQualitySensor);
@@ -191,7 +191,7 @@ export class AirPurifierAccessory {
       this.setServiceName(svc, preset.display);
       svc.getCharacteristic(C.On)
         .onGet(() => this.state?.mode === preset.apiMode)
-        .onSet(v => this.handlePresetSet(preset, v));
+        .onSet(this.guardCommand(`${preset.display} preset`, v => this.handlePresetSet(preset, v)));
       this.presetServices.set(preset.key, svc);
     }
 
@@ -208,7 +208,7 @@ export class AirPurifierAccessory {
       this.setServiceName(this.lightService, 'Display Light');
       this.lightService.getCharacteristic(C.On)
         .onGet(() => this.state?.lightOn ?? false)
-        .onSet(v => this.handleLightSet(v));
+        .onSet(this.guardCommand('Display Light', v => this.handleLightSet(v)));
     } else {
       // Remove a previously-registered service — user disabled it, or the
       // accessory was cached from a version that exposed it on every model.
@@ -428,6 +428,12 @@ export class AirPurifierAccessory {
   }
 
   private async refresh(): Promise<void> {
+    // The client already logged the pause when it started; HomeKit keeps
+    // showing the last known state until it lifts.
+    if (this.platform.client.isRateLimited()) {
+      this.platform.log.debug(`${this.device.name}: skipping poll while Coway rate-limits the account`);
+      return;
+    }
     // Guard against overlapping polls: a slow Coway response (3 round-trips,
     // up to ~75s with worst-case retries) can outlast the polling interval,
     // and unguarded setInterval would queue successors on top.
@@ -537,6 +543,29 @@ export class AirPurifierAccessory {
   }
 
   // --- helpers ---
+
+  /**
+   * Wrap a characteristic set handler so a failed command logs one line and
+   * fails the write with HAP's communication-failure status. A plain error
+   * escaping a set handler makes HAP log it as an unhandled error with a full
+   * stack trace.
+   */
+  private guardCommand(
+    label: string,
+    handler: (value: CharacteristicValue) => Promise<void>,
+  ): (value: CharacteristicValue) => Promise<void> {
+    return async value => {
+      try {
+        await handler(value);
+      } catch (err) {
+        this.platform.log.warn(
+          `${this.device.name}: ${label} command failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        const { HapStatusError, HAPStatus } = this.platform.api.hap;
+        throw new HapStatusError(HAPStatus.SERVICE_COMMUNICATION_FAILURE);
+      }
+    };
+  }
 
   /**
    * Set both `Name` (the static, often hidden identifier) and `ConfiguredName`

@@ -4,15 +4,14 @@ import {
 } from 'homebridge';
 
 import { PLATFORM_NAME, PLUGIN_NAME, DEFAULT_POLL_SECONDS } from './settings';
-import { RateLimitedError } from './api/auth';
+import { RATE_LIMIT_BACKOFF_MS, RateLimitedError } from './api/auth';
 import { CowayClient } from './api/cowayClient';
 import { AirPurifierAccessory } from './accessories/airPurifier';
 
 // Discovery retry backoff: start at the polling interval (never retry tighter
 // than it), double up to a 15-minute cap. A RateLimitedError waits the full
-// hour Coway's own error message asks for.
+// RATE_LIMIT_BACKOFF_MS instead.
 const DISCOVERY_RETRY_MAX_MS = 15 * 60 * 1000;
-const DISCOVERY_RETRY_RATE_LIMITED_MS = 60 * 60 * 1000;
 
 export interface AirmegaConfig extends PlatformConfig {
   username: string;
@@ -96,7 +95,7 @@ export class AirmegaPlatform implements DynamicPlatformPlugin {
       // form body (with the password) in their string form.
       const msg = err instanceof Error ? err.message : String(err);
       const rateLimited = err instanceof RateLimitedError;
-      const delay = rateLimited ? DISCOVERY_RETRY_RATE_LIMITED_MS : this.discoveryRetryMs;
+      const delay = rateLimited ? RATE_LIMIT_BACKOFF_MS : this.discoveryRetryMs;
       if (!rateLimited) {
         this.discoveryRetryMs = Math.min(this.discoveryRetryMs * 2, DISCOVERY_RETRY_MAX_MS);
       }

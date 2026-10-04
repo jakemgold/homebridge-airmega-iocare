@@ -13,7 +13,10 @@ export declare class CowayClient {
     private places;
     private refreshInFlight?;
     private readonly suppliesCache;
+    private rateLimitedUntil;
     constructor(opts: CowayClientOptions);
+    /** True while polling should stay away from Coway after a rate limit. */
+    isRateLimited(): boolean;
     /**
      * Run the full IoCare+ login flow, then prime the country code and places
      * cache so `listDevices()` can iterate without further auth-related round
@@ -22,8 +25,8 @@ export declare class CowayClient {
     login(): Promise<void>;
     listDevices(): Promise<CowayDevice[]>;
     /**
-     * Fetch the full state of one purifier. Three round-trips: an HTML scrape
-     * for the bulk of the state, plus separate JSON calls for filters and timer.
+     * Fetch the full state of one purifier: an HTML scrape for the bulk of the
+     * state, plus the filter-life JSON call (cached, see SUPPLIES_TTL_MS).
      * Mirrors cowayaio's `async_get_purifiers_data`.
      */
     getDeviceState(device: CowayDevice): Promise<DeviceState>;
@@ -33,7 +36,14 @@ export declare class CowayClient {
      * is the value Coway expects for that attribute (almost always a string).
      */
     sendCommand(device: CowayDevice, attribute: string, value: string | number): Promise<void>;
-    private fetchPurifierJson;
+    /**
+     * Run `work`, and if Coway answers with a rate limit, pause status polling
+     * for RATE_LIMIT_BACKOFF_MS: per Coway's own error message, requests made
+     * during the block extend it. Commands still go through, since they're
+     * user-initiated; one that hits the limit just extends the pause.
+     */
+    private watchRateLimit;
+    private fetchPurifierInfo;
     /**
      * Supplies (filter life), served from a per-device cache with a 30-minute
      * TTL — see SUPPLIES_TTL_MS. Polls between refreshes reuse the cached

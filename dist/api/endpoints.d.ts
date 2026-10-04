@@ -8,6 +8,8 @@ export declare const Endpoint: {
     readonly NOTICES: "/com/notices";
     readonly OAUTH_URL: "https://id.coway.com/auth/realms/cw-account/protocol/openid-connect/auth";
     readonly REDIRECT_URL: "https://iocare-redirect.iotsvc.coway.com/redirect_bridge_empty.html";
+    readonly R2_OAUTH_URL: "https://id.coway.com/r2/authorization/oidc/auth";
+    readonly R2_AUTHENTICATE_URL: "https://id.coway.com/r2/authorization/authenticate-rest";
     readonly PURIFIER_HTML_BASE: "https://iocare2.coway.com/en";
     readonly SECONDARY_BASE: "https://iocare2.coway.com/api/proxy/api/v1";
 };
@@ -17,6 +19,7 @@ export declare const Parameter: {
     readonly APP_VERSION: "2.15.0";
     readonly TIMEZONE: "America/Kentucky/Louisville";
 };
+export declare const R2_XSRF_COOKIE = "cwxsrf";
 export declare const Header: {
     readonly REGION: "NUS";
     readonly ACCEPT: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
@@ -26,9 +29,7 @@ export declare const Header: {
     readonly THEME: "light";
     readonly CALLING_PAGE: "product";
     readonly SOURCE_PATH: "iOS";
-    readonly USER_AGENT: "CowayAIO/0.2.4";
-    readonly COWAY_USER_AGENT: "CowayAIO/0.2.4";
-    readonly HTML_USER_AGENT: "CowayAIO/0.2.4";
+    readonly USER_AGENT: `homebridge-airmega-iocare/${string}`;
 };
 export declare const Attribute: {
     readonly POWER: "0001";
@@ -61,7 +62,6 @@ export declare const SensorKey: {
     readonly PRE_FILTER_USED_PCT: "0011";
     readonly MAX2_FILTER_USED_PCT: "0012";
 };
-export declare const PREFILTER_CYCLE: Record<number, string>;
 export declare const CATEGORY_NAME = "\uCCAD\uC815\uAE30";
 export declare const ErrorMessage: {
     readonly BAD_TOKEN: "Unauthenticated (crypto/rsa: verification error)";

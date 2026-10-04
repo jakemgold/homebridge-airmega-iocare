@@ -2,7 +2,7 @@ import axios, { AxiosRequestConfig, AxiosResponse } from 'axios';
 import { Logger } from 'homebridge';
 
 import {
-  AuthTokens, AuthError, RateLimitedError, performLogin, refreshAccessToken,
+  AuthTokens, AuthError, RATE_LIMIT_BACKOFF_MS, RateLimitedError, performLogin, refreshAccessToken,
 } from './auth';
 import {
   Attribute, CATEGORY_NAME, Endpoint, ErrorMessage, Header,
@@ -57,8 +57,17 @@ export class CowayClient {
   // In-flight token refresh, shared by every concurrent caller — see forceRefresh.
   private refreshInFlight?: Promise<void>;
   private readonly suppliesCache = new Map<string, { fetchedAt: number; entries: SuppliesEntry[] }>();
+  // Epoch ms until which status polling stays paused after Coway rate-limited
+  // the account. Rate limits are account-wide, so one pause covers every
+  // purifier sharing this client.
+  private rateLimitedUntil = 0;
 
   constructor(private readonly opts: CowayClientOptions) {}
+
+  /** True while polling should stay away from Coway after a rate limit. */
+  isRateLimited(): boolean {
+    return Date.now() < this.rateLimitedUntil;
+  }
 
   /**
    * Run the full IoCare+ login flow, then prime the country code and places
@@ -114,35 +123,33 @@ export class CowayClient {
   }
 
   /**
-   * Fetch the full state of one purifier. Three round-trips: an HTML scrape
-   * for the bulk of the state, plus separate JSON calls for filters and timer.
+   * Fetch the full state of one purifier: an HTML scrape for the bulk of the
+   * state, plus the filter-life JSON call (cached, see SUPPLIES_TTL_MS).
    * Mirrors cowayaio's `async_get_purifiers_data`.
    */
   async getDeviceState(device: CowayDevice): Promise<DeviceState> {
     if (!this.tokens) {
       throw new Error('CowayClient.getDeviceState() called before login()');
     }
-    const [purifierJson, supplies] = await Promise.all([
-      this.fetchPurifierJson(device),
+    const [purifierInfo, supplies] = await this.watchRateLimit(() => Promise.all([
+      this.fetchPurifierInfo(device),
       this.getSupplies(device),
-    ]);
+    ]));
 
     // If we couldn't extract anything from the HTML, fail the poll instead of
     // assembling state from empty objects. The caller catches and HomeKit
     // keeps the last known value, which is much safer than reporting healthy
     // defaults (e.g. "Pre-Filter 100%") that would mislead the user.
-    if (!purifierJson) {
+    if (!purifierInfo) {
       throw new Error(`Coway: could not extract purifier state from HTML for ${device.name}`);
     }
-    const purifierInfo = findFirstObject(purifierJson?.children) ?? {};
 
     const status = readPath<Record<string, unknown>>(
       purifierInfo, 'deviceStatusData.data.statusInfo.attributes',
     );
-    // A page that parses but whose inner structure moved (or whose first
-    // `children` entry stops being the payload) would otherwise fall through
-    // to an all-defaults state — power off, manual, speed 1 — that
-    // pushUpdates would present as authoritative. Fail the poll instead:
+    // A page that parses but whose inner structure moved would otherwise
+    // fall through to an all-defaults state — power off, manual, speed 1 —
+    // that pushUpdates would present as authoritative. Fail the poll instead:
     // same keep-last-known-state behavior as the unparseable case above,
     // and loud in the logs instead of silently lying about the device.
     if (!status || Object.keys(status).length === 0) {
@@ -182,7 +189,9 @@ export class CowayClient {
     // the device serial, and retry/error messages surface in warn-level logs
     // that users paste into GitHub issues. redact.ts strips serials from
     // logged bodies; the label keeps them out of logged URLs too.
-    const body = await this.authedJsonPost(url, payload, `control-status for ${device.name}`);
+    const body = await this.watchRateLimit(
+      () => this.authedJsonPost(url, payload, `control-status for ${device.name}`),
+    );
     // control-status uses a `header.error_code` envelope for app-level failures
     // (e.g. device offline). HTTP-level failures are already mapped to thrown
     // errors inside authedJsonPost.
@@ -197,7 +206,31 @@ export class CowayClient {
 
   // --- internals ---
 
-  private async fetchPurifierJson(device: CowayDevice): Promise<PurifierScrape | null> {
+  /**
+   * Run `work`, and if Coway answers with a rate limit, pause status polling
+   * for RATE_LIMIT_BACKOFF_MS: per Coway's own error message, requests made
+   * during the block extend it. Commands still go through, since they're
+   * user-initiated; one that hits the limit just extends the pause.
+   */
+  private async watchRateLimit<T>(work: () => Promise<T>): Promise<T> {
+    try {
+      return await work();
+    } catch (err) {
+      if (err instanceof RateLimitedError) {
+        const alreadyPaused = this.isRateLimited();
+        this.rateLimitedUntil = Date.now() + RATE_LIMIT_BACKOFF_MS;
+        if (!alreadyPaused) {
+          this.opts.log.warn(
+            `Coway is rate-limiting this account; pausing status updates for ` +
+            `${RATE_LIMIT_BACKOFF_MS / 60000} minutes.`,
+          );
+        }
+      }
+      throw err;
+    }
+  }
+
+  private async fetchPurifierInfo(device: CowayDevice): Promise<PurifierInfo | null> {
     await this.ensureFreshToken();
     const url = `${Endpoint.PURIFIER_HTML_BASE}/${device.placeId}/product/${device.modelCode}`;
     const context = `purifier HTML for ${device.name}`;
@@ -215,7 +248,7 @@ export class CowayClient {
           'accesstoken': this.tokens!.accessToken,
           'accept-language': Header.COWAY_LANGUAGE,
           'region': Header.REGION,
-          'user-agent': Header.HTML_USER_AGENT,
+          'user-agent': Header.USER_AGENT,
           'srcpath': Header.SOURCE_PATH,
           'deviceserial': device.deviceId,
         },
@@ -248,7 +281,7 @@ export class CowayClient {
     if (typeof resp.data !== 'string') {
       throw new Error(`Coway purifier HTML fetch failed for ${device.name}: non-text response`);
     }
-    return extractPurifierJsonFromHtml(resp.data);
+    return extractPurifierInfoFromHtml(resp.data);
   }
 
   /**
@@ -277,7 +310,7 @@ export class CowayClient {
           'accept': 'application/json, text/plain, */*',
           'authorization': `Bearer ${this.tokens!.accessToken}`,
           'accept-language': Header.COWAY_LANGUAGE,
-          'user-agent': Header.HTML_USER_AGENT,
+          'user-agent': Header.USER_AGENT,
         },
         params: {
           membershipYn: 'N',
@@ -291,7 +324,7 @@ export class CowayClient {
     );
     let resp = await doFetch();
     if (resp.status === 401) {
-      // Same one-shot refresh-and-retry as fetchPurifierJson: don't let a
+      // Same one-shot refresh-and-retry as fetchPurifierInfo: don't let a
       // server-side token revocation silently blank the filter data.
       await this.forceRefresh();
       resp = await doFetch();
@@ -506,7 +539,7 @@ export class CowayClient {
       'accept': '*/*',
       'authorization': `Bearer ${this.tokens.accessToken}`,
       'accept-language': Header.COWAY_LANGUAGE,
-      'user-agent': Header.COWAY_USER_AGENT,
+      'user-agent': Header.USER_AGENT,
     };
   }
 
@@ -568,7 +601,7 @@ export class CowayClient {
 // chaining or the readPath/find* helpers, which tolerate any shape.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyObj = Record<string, any>;
-type PurifierScrape = AnyObj;
+type PurifierInfo = AnyObj;
 
 interface SuppliesEntry {
   supplyNm?: string;
@@ -576,54 +609,138 @@ interface SuppliesEntry {
   replaceCycle?: number;
 }
 
+// The purifier page is a Next.js app. Its state rides in the React Server
+// Components "flight" stream, which the page embeds as a series of
+// `self.__next_f.push([1, "<chunk>"])` scripts. Chunks tagged 1 carry flight
+// data (other tags carry bootstrap and form state), and joining them in order
+// rebuilds the stream, since one row can straddle two chunks.
+const FLIGHT_PUSH_CALL = 'self.__next_f.push(';
+const FLIGHT_DATA_CHUNK = 1;
+
 /**
- * The Airmega state HTML has a single <script> tag whose body contains the
- * product page's full JSON state model. cowayaio targets it via
- * `script:-soup-contains("sensorInfo")` and slices from first `{` to last `}`.
- *
- * Coway embeds the JSON with one round of string-escaping (so `"foo"` arrives
- * as `\"foo\"`, etc.). cowayaio handles this by stripping every backslash —
- * which works against the live API today but corrupts any string that
- * legitimately contains a backslash. We layer a safer approach on top:
- *
- *   1. Try parsing the slice as plain JSON. If Coway ever stops over-escaping
- *      this just works.
- *   2. Fall back to the cowayaio-style blanket strip and parse again.
- *
- * Both attempts run a reviver that drops `__proto__` / `constructor` /
- * `prototype` keys to block prototype-pollution gadgets in case the input is
- * tampered with despite our TLS + host-validation defenses.
+ * Pull the purifier's page-props object out of the product page: the object
+ * that carries the `coreData` array and the `deviceStatusData` block every
+ * state read starts from. Returns null when the page doesn't contain it.
  */
-function extractPurifierJsonFromHtml(html: string): PurifierScrape | null {
+function extractPurifierInfoFromHtml(html: string): PurifierInfo | null {
+  return findPurifierInfo(readFlightStream(html));
+}
+
+function readFlightStream(html: string): string {
+  const chunks: string[] = [];
   const scriptRe = /<script\b[^>]*>([\s\S]*?)<\/script>/gi;
   let match: RegExpExecArray | null;
   while ((match = scriptRe.exec(html)) !== null) {
     const body = match[1];
-    if (!body.includes('sensorInfo')) continue;
-    const start = body.indexOf('{');
-    const end = body.lastIndexOf('}');
+    const call = body.indexOf(FLIGHT_PUSH_CALL);
+    if (call < 0) continue;
+    const start = body.indexOf('[', call + FLIGHT_PUSH_CALL.length);
+    const end = body.lastIndexOf(']');
     if (start < 0 || end <= start) continue;
-    const raw = body.slice(start, end + 1);
+    // The chunk is a JSON string literal; decoding it as JSON (rather than
+    // stripping backslashes) keeps legitimately escaped characters intact.
+    const args = safeJsonParse(body.slice(start, end + 1));
+    if (Array.isArray(args) && args[0] === FLIGHT_DATA_CHUNK && typeof args[1] === 'string') {
+      chunks.push(args[1]);
+    }
+  }
+  return chunks.join('');
+}
 
-    // Path 1: maybe Coway is already returning plain JSON.
-    const direct = safeJsonParse(raw);
-    if (direct) return direct as PurifierScrape;
+const PURIFIER_INFO_KEY = '"deviceStatusData"';
 
-    // Path 2: cowayaio's blanket-strip fallback for the current
-    // double-escaped form. Lossy for fields with legitimate backslashes,
-    // but matches the live shape today.
-    const stripped = safeJsonParse(raw.replace(/\\/g, ''));
-    if (stripped) return stripped as PurifierScrape;
+/**
+ * Find the first object, in document order, that looks like the purifier's
+ * page props. The stream is a series of rows separated by newlines: mostly
+ * JSON, which never contains a raw newline, mixed with row prefixes and raw
+ * text. So the object sits on the same line as its `deviceStatusData` key,
+ * and only those lines need searching. Scoping the search matters: decoding
+ * the whole ~400 KB stream costs over 100 ms per poll on a Raspberry Pi, all
+ * of it blocking Homebridge's event loop.
+ */
+function findPurifierInfo(stream: string): PurifierInfo | null {
+  let key = stream.indexOf(PURIFIER_INFO_KEY);
+  while (key >= 0) {
+    const lineStart = stream.lastIndexOf('\n', key) + 1;
+    const newline = stream.indexOf('\n', key);
+    const lineEnd = newline < 0 ? stream.length : newline;
+    const hit = searchSpan(stream, lineStart, lineEnd);
+    if (hit) return hit;
+    key = stream.indexOf(PURIFIER_INFO_KEY, lineEnd);
   }
   return null;
+}
+
+/**
+ * Try to decode a JSON value at each `{` in `text[from, to)`. When one
+ * decodes, search inside it, then jump past its span instead of rescanning
+ * the braces it contained.
+ */
+function searchSpan(text: string, from: number, to: number): PurifierInfo | null {
+  let i = text.indexOf('{', from);
+  while (i >= 0 && i < to) {
+    const end = jsonValueEnd(text, i, to);
+    const value = end < 0 ? null : safeJsonParse(text.slice(i, end));
+    if (value === null) {
+      i = text.indexOf('{', i + 1);
+      continue;
+    }
+    const hit = findInTree(value, isPurifierInfo);
+    if (hit) return hit;
+    i = text.indexOf('{', end);
+  }
+  return null;
+}
+
+function isPurifierInfo(obj: AnyObj): boolean {
+  return Array.isArray(obj.coreData)
+    && !!obj.deviceStatusData && typeof obj.deviceStatusData === 'object';
+}
+
+/** Pre-order (document-order) search of a decoded JSON tree. */
+function findInTree(root: unknown, match: (obj: AnyObj) => boolean): AnyObj | null {
+  const stack: unknown[] = [root];
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (!node || typeof node !== 'object') continue;
+    if (!Array.isArray(node) && match(node as AnyObj)) return node as AnyObj;
+    const children = Object.values(node as AnyObj);
+    for (let k = children.length - 1; k >= 0; k--) stack.push(children[k]);
+  }
+  return null;
+}
+
+/**
+ * Index just past the JSON object or array that opens at `start`, or -1 if
+ * it doesn't close before `limit`. Brackets inside string literals don't
+ * count; whether the span is valid JSON is left to the parser.
+ */
+function jsonValueEnd(text: string, start: number, limit: number): number {
+  let depth = 0;
+  let inString = false;
+  for (let i = start; i < limit; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (ch === '\\') i++;
+      else if (ch === '"') inString = false;
+    } else if (ch === '"') {
+      inString = true;
+    } else if (ch === '{' || ch === '[') {
+      depth++;
+    } else if (ch === '}' || ch === ']') {
+      if (--depth === 0) return i + 1;
+    }
+  }
+  return -1;
 }
 
 const DANGEROUS_JSON_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
 /**
  * `JSON.parse` with a reviver that strips keys commonly used in
- * prototype-pollution exploits. Returns null if the input doesn't parse —
- * the caller decides whether to fall back to a different decoding strategy.
+ * prototype-pollution exploits, in case the page is tampered with despite
+ * our TLS + host-validation defenses. Returns null if the input doesn't
+ * parse.
  */
 function safeJsonParse(text: string): unknown {
   try {
@@ -634,16 +751,6 @@ function safeJsonParse(text: string): unknown {
   } catch {
     return null;
   }
-}
-
-function findFirstObject(arr: unknown): AnyObj | null {
-  if (!Array.isArray(arr)) return null;
-  for (const item of arr) {
-    if (item && typeof item === 'object' && !Array.isArray(item)) {
-      return item as AnyObj;
-    }
-  }
-  return null;
 }
 
 function readPath<T>(obj: AnyObj | null | undefined, path: string): T | undefined {
@@ -678,6 +785,8 @@ function findSensorAttributes(purifierInfo: AnyObj): AnyObj {
 /**
  * Walk purifier_info.coreData[*] for the entry whose `data` carries
  * `currentMcuVer`. cowayaio reports this as the device's firmware version.
+ * Coway's current page omits it; the accessory then keeps its cached
+ * firmware revision.
  */
 function findMcuVersion(purifierInfo: AnyObj): string | undefined {
   const coreData = purifierInfo?.coreData;

@@ -26,8 +26,10 @@ exports.LIGHT_SWITCH_MODELS = {
     'AP-2015E': true, // Airmega 400S
     // Unverified — per cowayaio's plain async_set_light ("NOT used for 250s")
     'AP-1521E': true, // Airmega 300S
+    'AP-1515G': true, // Airmega 300S variant (issue #8)
     'AP-1512HHS': true, // Airmega MightyS
     'AP-1719A': false, // Airmega 250S — inverted multi-mode register
+    'AP-1720G': false, // Airmega 250S variant (issue #9) — inverted multi-mode register
     'AP-1722B': false, // Airmega IconS — inverted multi-mode register
 };
 // Conservative default for an unrecognized productModel: hide the switch.
@@ -38,8 +40,10 @@ exports.PM_CAPABILITIES = {
     'AP-2015E': { pm10: true, pm25: false }, // Airmega 400S
     // Unverified — sourced from HA's documented per-model availability
     'AP-1521E': { pm10: true, pm25: false }, // Airmega 300S
+    'AP-1515G': { pm10: true, pm25: false }, // Airmega 300S variant (issue #8)
     'AP-1512HHS': { pm10: true, pm25: false }, // Airmega MightyS
     'AP-1719A': { pm10: true, pm25: true }, // Airmega 250S
+    'AP-1720G': { pm10: true, pm25: true }, // Airmega 250S variant (issue #9)
     'AP-1722B': { pm10: false, pm25: true }, // Airmega IconS
 };
 // Conservative default for an unrecognized productModel: expose nothing
@@ -51,8 +55,10 @@ exports.PRESET_CAPABILITIES = {
     'AP-2015E': { sleep: true, eco: false, smart: false }, // Airmega 400S
     // Unverified — per cowayaio docstrings + HA's per-model gating
     'AP-1521E': { sleep: true, eco: false, smart: false }, // Airmega 300S
+    'AP-1515G': { sleep: true, eco: false, smart: false }, // Airmega 300S variant (issue #8)
     'AP-1512HHS': { sleep: false, eco: true, smart: false }, // Airmega MightyS
     'AP-1719A': { sleep: true, eco: false, smart: true }, // Airmega 250S
+    'AP-1720G': { sleep: true, eco: false, smart: true }, // Airmega 250S variant (issue #9)
     'AP-1722B': { sleep: true, eco: false, smart: false }, // Airmega IconS
 };
 // Conservative default for an unrecognized productModel: expose only Sleep

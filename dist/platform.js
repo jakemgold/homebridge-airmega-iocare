@@ -7,9 +7,8 @@ const cowayClient_1 = require("./api/cowayClient");
 const airPurifier_1 = require("./accessories/airPurifier");
 // Discovery retry backoff: start at the polling interval (never retry tighter
 // than it), double up to a 15-minute cap. A RateLimitedError waits the full
-// hour Coway's own error message asks for.
+// RATE_LIMIT_BACKOFF_MS instead.
 const DISCOVERY_RETRY_MAX_MS = 15 * 60 * 1000;
-const DISCOVERY_RETRY_RATE_LIMITED_MS = 60 * 60 * 1000;
 class AirmegaPlatform {
     log;
     config;
@@ -78,7 +77,7 @@ class AirmegaPlatform {
             // form body (with the password) in their string form.
             const msg = err instanceof Error ? err.message : String(err);
             const rateLimited = err instanceof auth_1.RateLimitedError;
-            const delay = rateLimited ? DISCOVERY_RETRY_RATE_LIMITED_MS : this.discoveryRetryMs;
+            const delay = rateLimited ? auth_1.RATE_LIMIT_BACKOFF_MS : this.discoveryRetryMs;
             if (!rateLimited) {
                 this.discoveryRetryMs = Math.min(this.discoveryRetryMs * 2, DISCOVERY_RETRY_MAX_MS);
             }

@@ -3,7 +3,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.RateLimitedError = exports.PasswordExpiredError = exports.AuthError = void 0;
+exports.RATE_LIMIT_BACKOFF_MS = exports.RateLimitedError = exports.PasswordExpiredError = exports.AuthError = void 0;
 exports.performLogin = performLogin;
 exports.refreshAccessToken = refreshAccessToken;
 const axios_1 = __importDefault(require("axios"));
@@ -29,16 +29,20 @@ exports.PasswordExpiredError = PasswordExpiredError;
 class RateLimitedError extends Error {
 }
 exports.RateLimitedError = RateLimitedError;
+// How long to stay away after a RateLimitedError: the full hour Coway's own
+// error message asks for. Retrying sooner deepens the block.
+exports.RATE_LIMIT_BACKOFF_MS = 60 * 60 * 1000;
 /**
  * Run the IoCare+ OAuth-style login flow:
  *  1. GET the keycloak login page; capture cookies and the form action URL
  *     (which contains a session_code).
- *  2. POST username + password to that action URL.
- *     - If Coway responds with a "Password change message" page and the caller
- *       opted in to skipping, POST the skip-form once and continue.
- *  3. axios follows the redirect to .../redirect_bridge_empty.html?code=<auth_code>;
- *     we read the auth code off the final request path.
- *  4. POST the auth code to /com/token to exchange for access + refresh tokens.
+ *  2. POST username + password to that action URL. Then either:
+ *     - Coway responds with a "Password change message" page: if the caller
+ *       opted in to skipping, POST the skip-form once; axios follows the
+ *       redirect to .../redirect_bridge_empty.html?code=<auth_code> and we
+ *       read the auth code off the final request path.
+ *     - Otherwise, get the auth code from the r2 login (see authenticateViaR2).
+ *  3. POST the auth code to /com/token to exchange for access + refresh tokens.
  */
 async function performLogin(params) {
     const { username, log } = params;
@@ -59,7 +63,7 @@ async function refreshAccessToken(refreshToken, log) {
             'content-type': endpoints_1.Header.CONTENT_JSON,
             'accept': '*/*',
             'accept-language': endpoints_1.Header.COWAY_LANGUAGE,
-            'user-agent': endpoints_1.Header.COWAY_USER_AGENT,
+            'user-agent': endpoints_1.Header.USER_AGENT,
         },
         ...(0, http_1.baseRequestConfig)(),
     }), log, 'token refresh');
@@ -147,7 +151,7 @@ async function submitCredentials(actionUrl, cookies, params) {
         ...(0, http_1.baseRequestConfig)(),
     }), params.log, 'credentials submit');
     // Map only rate-limit and server errors here; 4xx pages still carry HTML
-    // that handleAuthResponse turns into friendlier errors (bad credentials,
+    // that the checks below turn into friendlier errors (bad credentials,
     // password-change prompt).
     if (resp.status === 429) {
         throw new RateLimitedError('Coway rate-limited on credentials submit: HTTP 429. Wait at least an hour before retrying.');
@@ -155,41 +159,28 @@ async function submitCredentials(actionUrl, cookies, params) {
     if (resp.status >= 500) {
         throw new Error(`Coway credentials submit failed: HTTP ${resp.status}`);
     }
-    // Merge Set-Cookie from this response over the login-page cookies before
-    // any follow-up POST. Keycloak can rotate its session cookies between login
-    // steps; replaying only the original cookie string on the password-skip
-    // form gets an expired-page response instead of the bridge redirect. The
-    // reference implementation gets this for free from its session cookie jar.
-    return await handleAuthResponse(resp, mergeCookies(cookies, resp), params);
-}
-async function handleAuthResponse(resp, cookies, params) {
-    const finalPath = readFinalPath(resp);
-    if (finalPath?.includes('redirect_bridge_empty.html')) {
-        // Defense in depth: confirm we actually landed on Coway's bridge host
-        // before extracting an auth code from its query string.
-        assertCowayHost(finalPath, COWAY_BRIDGE_HOST, 'final redirect');
-        const code = extractAuthCodeFromPath(finalPath);
-        if (!code) {
-            throw new AuthError('Coway redirected to bridge URL but no auth code was found.');
-        }
-        return code;
-    }
-    // No bridge redirect — must be either the password-change page or an error page.
     const html = String(resp.data ?? '');
-    const title = extractTitle(html);
-    if (title === 'Coway - Password change message') {
+    if (extractTitle(html) === 'Coway - Password change message') {
         if (!params.skipPasswordChange) {
             throw new PasswordExpiredError("Coway is requesting a password change (the password hasn't been changed for 60 days or more).");
         }
         params.log.warn('Coway requested a password change for this account; skipping for now. ' +
             'Eventually rotate the password in the IoCare+ app.');
-        return await submitPasswordSkip(html, cookies, params);
+        // Merge Set-Cookie from this response over the login-page cookies before
+        // the skip POST. Keycloak can rotate its session cookies between login
+        // steps; replaying only the original cookie string on the password-skip
+        // form gets an expired-page response instead of the bridge redirect. The
+        // reference implementation gets this for free from its session cookie jar.
+        return await submitPasswordSkip(html, mergeCookies(cookies, resp), params);
     }
-    // Otherwise this is a generic failure — usually bad credentials.
     if (html.includes('Your ID or password is incorrect.')) {
         throw new AuthError('Coway login failed: invalid username or password.');
     }
-    throw new AuthError(`Coway login failed; unexpected page (title=${title ?? 'unknown'}).`);
+    // For accounts Coway isn't prompting for a password change, this form no
+    // longer yields a usable auth code (the token endpoint rejects it as an
+    // invalid authorization code). Those accounts log in through r2, matching
+    // cowayaio.
+    return await authenticateViaR2(params);
 }
 async function submitPasswordSkip(passwordChangeHtml, cookies, params) {
     const skipActionUrl = extractFormAction(passwordChangeHtml, 'kc-password-change-form');
@@ -215,14 +206,171 @@ async function submitPasswordSkip(passwordChangeHtml, cookies, params) {
         ...(0, http_1.baseRequestConfig)(),
     }), params.log, 'password-skip submit');
     // After skipping we expect the bridge redirect with a code.
-    return await handleAuthResponse(resp, mergeCookies(cookies, resp), { ...params, skipPasswordChange: false });
+    const finalPath = readFinalPath(resp);
+    if (!finalPath?.includes('redirect_bridge_empty.html')) {
+        const title = extractTitle(String(resp.data ?? ''));
+        throw new AuthError(`Coway login failed; unexpected page after password-change skip (title=${title ?? 'unknown'}).`);
+    }
+    // Defense in depth: confirm we actually landed on Coway's bridge host
+    // before extracting an auth code from its query string.
+    assertCowayHost(finalPath, COWAY_BRIDGE_HOST, 'final redirect');
+    const code = extractAuthCodeFromPath(finalPath);
+    if (!code) {
+        throw new AuthError('Coway redirected to bridge URL but no auth code was found.');
+    }
+    return code;
+}
+/**
+ * Log in through Coway's r2 authorization service: start a session to pick up
+ * its CSRF cookie, POST the credentials as JSON, and read the auth code off
+ * the redirect URI in the JSON response.
+ */
+async function authenticateViaR2(params) {
+    const { cookies, xsrfToken } = await startR2Session(params.log);
+    const cookieHeader = cookies.headerFor(endpoints_1.Endpoint.R2_AUTHENTICATE_URL);
+    const resp = await (0, http_1.withRetry)(() => axios_1.default.post(endpoints_1.Endpoint.R2_AUTHENTICATE_URL, {
+        username: params.username,
+        password: params.password,
+        is_remember_me: true,
+        client_id: endpoints_1.Parameter.CLIENT_ID,
+        redirect_uri: endpoints_1.Endpoint.REDIRECT_URL,
+    }, {
+        headers: {
+            'content-type': endpoints_1.Header.CONTENT_JSON,
+            'user-agent': endpoints_1.Header.USER_AGENT,
+            'x-xsrf-token': xsrfToken,
+            ...(cookieHeader ? { cookie: cookieHeader } : {}),
+        },
+        ...(0, http_1.baseRequestConfig)(),
+    }), params.log, 'r2 credentials submit');
+    if (resp.status === 429) {
+        throw new RateLimitedError('Coway rate-limited on r2 credentials submit: HTTP 429. Wait at least an hour before retrying.');
+    }
+    if (resp.status >= 500) {
+        throw new Error(`Coway r2 credentials submit failed: HTTP ${resp.status}`);
+    }
+    if (resp.data?.error === 'invalid_credential') {
+        throw new AuthError('Coway login failed: invalid username or password.');
+    }
+    if (resp.status !== 200) {
+        throw new AuthError(`Coway r2 login failed: HTTP ${resp.status} (body=${(0, redact_1.redactBody)(resp.data)})`);
+    }
+    const redirectUri = resp.data?.redirect_uri;
+    if (typeof redirectUri !== 'string') {
+        throw new AuthError(`Coway r2 login returned no redirect URI (body=${(0, redact_1.redactBody)(resp.data)})`);
+    }
+    assertCowayHost(redirectUri, COWAY_BRIDGE_HOST, 'r2 redirect');
+    const code = extractAuthCodeFromPath(redirectUri);
+    if (!code) {
+        throw new AuthError('Coway r2 login redirect carried no auth code.');
+    }
+    return code;
+}
+// The r2 session start bounces through Keycloak and back over several
+// redirects and sets its CSRF cookie on an intermediate hop. axios only
+// exposes the final response's headers, so we follow the hops ourselves and
+// collect cookies along the way.
+const R2_MAX_REDIRECTS = 8;
+async function startR2Session(log) {
+    const cookies = new CookieJar();
+    const start = new url_1.URL(endpoints_1.Endpoint.R2_OAUTH_URL);
+    start.search = new url_1.URLSearchParams({
+        response_type: 'code',
+        client_id: endpoints_1.Parameter.CLIENT_ID,
+        redirect_uri: endpoints_1.Endpoint.REDIRECT_URL,
+        ui_locales: 'en',
+        scope: 'openid profile email',
+    }).toString();
+    let url = start.toString();
+    for (let hop = 0; hop <= R2_MAX_REDIRECTS; hop++) {
+        assertCowayHost(url, COWAY_AUTH_HOST, 'r2 session redirect');
+        const target = url;
+        const cookieHeader = cookies.headerFor(target);
+        const resp = await (0, http_1.withRetry)(() => axios_1.default.get(target, {
+            headers: {
+                'content-type': 'application/x-www-form-urlencoded',
+                'user-agent': endpoints_1.Header.USER_AGENT,
+                ...(cookieHeader ? { cookie: cookieHeader } : {}),
+            },
+            maxRedirects: 0,
+            ...(0, http_1.baseRequestConfig)(),
+        }), log, 'r2 session start');
+        cookies.absorb(resp);
+        if (resp.status === 429) {
+            throw new RateLimitedError('Coway rate-limited on r2 session start: HTTP 429. Wait at least an hour before retrying.');
+        }
+        if (resp.status >= 300 && resp.status < 400) {
+            const location = resp.headers?.location;
+            if (typeof location !== 'string') {
+                throw new AuthError(`Coway r2 session start: HTTP ${resp.status} without a location.`);
+            }
+            url = new url_1.URL(location, target).toString();
+            continue;
+        }
+        if (resp.status !== 200) {
+            throw new Error(`Coway r2 session start failed: HTTP ${resp.status}`);
+        }
+        const xsrfToken = cookies.get(endpoints_1.R2_XSRF_COOKIE);
+        if (!xsrfToken) {
+            throw new AuthError('Coway r2 session start did not set a CSRF token.');
+        }
+        return { cookies, xsrfToken };
+    }
+    throw new AuthError('Coway r2 session start redirected too many times.');
+}
+/**
+ * Just enough of a cookie jar for the r2 login: remembers cookies across
+ * redirect hops and sends each one only to paths under its Path attribute,
+ * so Keycloak's realm-scoped session cookies stay with Keycloak.
+ */
+class CookieJar {
+    cookies = new Map();
+    absorb(resp) {
+        const setCookie = resp.headers?.['set-cookie'];
+        if (!setCookie)
+            return;
+        for (const line of Array.isArray(setCookie) ? setCookie : [setCookie]) {
+            const [pair, ...attrs] = String(line).split(';');
+            const eq = pair.indexOf('=');
+            if (eq <= 0)
+                continue;
+            const name = pair.slice(0, eq).trim();
+            let path = '/';
+            let expired = false;
+            for (const attr of attrs) {
+                const [rawKey, rawValue = ''] = attr.split('=');
+                const key = rawKey.trim().toLowerCase();
+                const value = rawValue.trim();
+                if (key === 'path' && value)
+                    path = value;
+                if (key === 'max-age' && value !== '' && Number(value) <= 0)
+                    expired = true;
+            }
+            if (expired) {
+                this.cookies.delete(name);
+            }
+            else {
+                this.cookies.set(name, { value: pair.slice(eq + 1).trim(), path });
+            }
+        }
+    }
+    get(name) {
+        return this.cookies.get(name)?.value;
+    }
+    headerFor(url) {
+        const path = new url_1.URL(url).pathname;
+        return [...this.cookies.entries()]
+            .filter(([, cookie]) => path.startsWith(cookie.path))
+            .map(([name, cookie]) => `${name}=${cookie.value}`)
+            .join('; ');
+    }
 }
 async function exchangeCodeForTokens(authCode, log) {
     const url = `${endpoints_1.Endpoint.BASE_URI}${endpoints_1.Endpoint.GET_TOKEN}`;
     const resp = await (0, http_1.withRetry)(() => axios_1.default.post(url, { authCode, redirectUrl: endpoints_1.Endpoint.REDIRECT_URL }, {
         headers: {
             'content-type': endpoints_1.Header.CONTENT_JSON,
-            'user-agent': endpoints_1.Header.COWAY_USER_AGENT,
+            'user-agent': endpoints_1.Header.USER_AGENT,
             'accept-language': endpoints_1.Header.COWAY_LANGUAGE,
         },
         ...(0, http_1.baseRequestConfig)(),

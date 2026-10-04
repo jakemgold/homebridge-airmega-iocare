@@ -20,8 +20,9 @@ const SENSITIVE_KEYS = new Set([
     'password', 'new_password', 'current_password', 'new_password_confirm',
     'authorization', 'cookie',
     'authCode', 'auth_code', 'code', 'session_code',
+    'redirect_uri', // carries the auth code as a query parameter
     // Personally identifying
-    'email', 'mobileNo', 'phoneNumber', 'phone', 'mobile',
+    'email', 'username', 'mobileNo', 'phoneNumber', 'phone', 'mobile',
     'firstName', 'lastName', 'fullName', 'memberName', 'userName',
     // Account / device identifiers
     'memberId', 'userId', 'user_id', 'memberNo',

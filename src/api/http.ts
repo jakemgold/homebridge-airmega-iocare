@@ -1,11 +1,12 @@
 import { AxiosRequestConfig, AxiosResponse } from 'axios';
 import { Logger } from 'homebridge';
 
-// Cap any single response we accept from Coway. The HTML scrape is the largest
-// legitimate response (~50 KB live), so 2 MB gives a comfortable margin while
-// preventing a misbehaving or hostile response from OOM-ing the Homebridge
-// process via axios's response buffer.
-export const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+// Cap any single response we accept from Coway. The purifier status page is
+// the largest legitimate response (~470 KB decompressed), so 8 MB leaves room
+// for the page to keep growing while still preventing a misbehaving or
+// hostile response from OOM-ing the Homebridge process via axios's response
+// buffer.
+export const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 
 // Retry parameters for transient failures: 5xx responses and network-level
 // errors (timeout, connection reset, DNS — the same outage often surfaces

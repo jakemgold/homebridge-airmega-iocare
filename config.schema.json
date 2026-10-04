@@ -27,7 +27,7 @@
         "title": "Skip 60-day password change prompt",
         "type": "boolean",
         "default": true,
-        "description": "Coway forces password rotation every 60 days. Leave true to defer; set false to be re-prompted via reauth."
+        "description": "Coway asks for a new password every 60 days. Leave on to keep deferring the request. If off, login fails until you change the password in the IoCare+ app and update it here."
       },
       "pollingInterval": {
         "title": "Polling interval (seconds)",

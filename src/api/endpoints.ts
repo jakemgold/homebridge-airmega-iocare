@@ -3,10 +3,12 @@
 // directions: the write path sends these codes as commands, and the read path
 // looks the same keys up in the scraped status block. One table, so the two
 // sides can't drift.
-// Source: ported from RobertD502/cowayaio v0.2.4 (Oct 2025) — the more recently
-// updated reference. OrigamiDream/homebridge-coway is on older endpoints
+// Source: RobertD502/cowayaio, kept in step through v0.2.8 (Oct 2026).
+// OrigamiDream/homebridge-coway is on older endpoints
 // (iocareapi.iot.coway.com vs cowayaio's iocare.iotsvc.coway.com) and was
 // not used as the URL source.
+
+import { PLUGIN_NAME, PLUGIN_VERSION } from '../settings';
 
 export const Endpoint = {
   // Token + JSON-API host
@@ -21,6 +23,9 @@ export const Endpoint = {
   // OAuth / OIDC
   OAUTH_URL: 'https://id.coway.com/auth/realms/cw-account/protocol/openid-connect/auth',
   REDIRECT_URL: 'https://iocare-redirect.iotsvc.coway.com/redirect_bridge_empty.html',
+  // r2 login, used by accounts Coway isn't prompting for a password change
+  R2_OAUTH_URL: 'https://id.coway.com/r2/authorization/oidc/auth',
+  R2_AUTHENTICATE_URL: 'https://id.coway.com/r2/authorization/authenticate-rest',
 
   // Per-device HTML page (state poll) + secondary JSON proxy (filters / timer)
   PURIFIER_HTML_BASE: 'https://iocare2.coway.com/en',
@@ -33,6 +38,10 @@ export const Parameter = {
   APP_VERSION: '2.15.0',
   TIMEZONE: 'America/Kentucky/Louisville',
 } as const;
+
+// CSRF cookie set when an r2 login session starts; its value goes back as the
+// x-xsrf-token header on the credentials POST.
+export const R2_XSRF_COOKIE = 'cwxsrf';
 
 export const Header = {
   // Region header sent on JSON-API and scrape calls. Fixed to NUS (North
@@ -50,11 +59,11 @@ export const Header = {
   THEME: 'light',
   CALLING_PAGE: 'product',
   SOURCE_PATH: 'iOS',
-  // cowayaio reuses its own UA across all three; we do the same. The literal
-  // matters less than that it's stable across calls in a session.
-  USER_AGENT: 'CowayAIO/0.2.4',
-  COWAY_USER_AGENT: 'CowayAIO/0.2.4',
-  HTML_USER_AGENT: 'CowayAIO/0.2.4',
+  // Sent on every request. Coway tells IoCare+ clients apart by User-Agent
+  // (cowayaio's maintainer arranged this with Coway for Home Assistant
+  // traffic), so identify this plugin by name and version rather than
+  // borrowing another client's.
+  USER_AGENT: `${PLUGIN_NAME}/${PLUGIN_VERSION}`,
 } as const;
 
 // --- Control registers ---
@@ -109,15 +118,6 @@ export const SensorKey = {
   PRE_FILTER_USED_PCT: '0011',   // sensor-derived fallback when /supplies is empty
   MAX2_FILTER_USED_PCT: '0012',
 } as const;
-
-// Pre-filter wash-cycle frequency values (0x0001 on the control-param endpoint).
-// Index is the "weeks" exposed in the IoCare+ app (2, 3, or 4).
-// Out of scope for v1 but kept here so the porting target is one file.
-export const PREFILTER_CYCLE: Record<number, string> = {
-  2: '1',
-  3: '2',
-  4: '3',
-};
 
 // Coway returns this localized string for air-purifier devices in the place-listing
 // response. Verified live against the 400S — value is Korean even on a US-region

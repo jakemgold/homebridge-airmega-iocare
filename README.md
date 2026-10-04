@@ -156,7 +156,7 @@ The Homebridge UI Settings form drives this for you, but the underlying `config.
 |----------------------|---------|-------------|
 | `username`           | —       | IoCare+ login (email or phone number). Required. |
 | `password`           | —       | IoCare+ password. Required. |
-| `skipPasswordChange` | `true`  | Coway forces a password change every 60 days. With this on, the plugin defers the prompt and continues working. Set to `false` if you want to be re-prompted. |
+| `skipPasswordChange` | `true`  | Coway asks for a new password every 60 days. With this on, the plugin defers the request and continues working. With it off, login fails until you change the password in the IoCare+ app and update it here. |
 | `pollingInterval`    | `60`    | Seconds between state polls. Minimum 30. |
 | `exposeLight`        | `true`  | Whether to expose the front-panel LED as a HomeKit switch. |
 
@@ -201,9 +201,11 @@ If that file doesn't exist, the install went to the wrong location. Re-run the i
 
 ### Login failures
 
-The most common cause is the 60-day password rotation. The plugin warns about it on every restart while the prompt is active — but if you've recently changed your password in the IoCare+ app, the plugin should pick up the new one immediately on the next restart.
+The most common cause is a changed password. The plugin logs in with the password saved in its settings, so if you change your password in the IoCare+ app (for example, after Coway's 60-day reminder), update it in the plugin settings too and restart Homebridge.
 
-If you see `RateLimited` in the logs, your account has been temporarily blocked by Coway. Wait at least 24 hours and try again. If you still can't log in via the official IoCare+ app either, contact Coway support.
+While the 60-day reminder is active, the plugin warns about it on every restart and keeps working, as long as **Skip 60-day password change prompt** is on (the default).
+
+If the log says Coway **rate-limited** the account, the plugin pauses status updates for an hour on its own. If logins keep failing after that, wait at least 24 hours and try again. If you still can't log in via the official IoCare+ app either, contact Coway support.
 
 ### Plugin works but Apple Home is stale
 

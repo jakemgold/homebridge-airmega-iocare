@@ -58,6 +58,13 @@ export declare class AirPurifierAccessory {
     private pushFirmwareRevision;
     private clearAllPresets;
     /**
+     * Wrap a characteristic set handler so a failed command logs one line and
+     * fails the write with HAP's communication-failure status. A plain error
+     * escaping a set handler makes HAP log it as an unhandled error with a full
+     * stack trace.
+     */
+    private guardCommand;
+    /**
      * Set both `Name` (the static, often hidden identifier) and `ConfiguredName`
      * (the user-visible label Apple Home actually displays for sub-services).
      * Without ConfiguredName, every sub-tile in iOS 16+ falls back to the
