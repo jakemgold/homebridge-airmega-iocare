@@ -20,6 +20,9 @@ Fixes for two changes Coway made to its service, support for two more model vari
 - Coway's status page no longer reports the purifier's firmware version, so the firmware shown in Apple Home stays at its last known value.
 - The README and setup screen now explain that after changing your Coway password, you also need to update it in the plugin settings.
 
+### Security
+- Updated axios, the library the plugin uses to talk to Coway, to 1.20.0 for a batch of security advisories. Existing installs pick up the update along with this version.
+
 ## [1.1.0] — 2026-07-05
 
 A reliability release. A deep review of the whole plugin turned up a batch of real bugs; this release fixes them and makes the plugin a better citizen of Coway's servers. No configuration changes are needed.
