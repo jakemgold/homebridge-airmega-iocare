@@ -4,6 +4,22 @@ All notable changes to `homebridge-airmega-iocare` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] — 2026-10-04
+
+Fixes for two changes Coway made to its service, support for two more model variants, and a few reliability improvements. No configuration changes are needed.
+
+### Fixed
+- The purifier's status updates again. In mid-September Coway rebuilt the web page the plugin reads status from, and every refresh since then failed with "could not extract purifier state from HTML", leaving Apple Home stuck on the last known state. The plugin now reads the new page format.
+- Logging in works for accounts Coway isn't currently asking to change their password. Coway moved those accounts to a new sign-in flow in early October, and the plugin now uses it. Accounts that see the 60-day password reminder keep using the existing flow.
+- The Airmega 300S reporting model code `AP-1515G` and the 250S reporting `AP-1720G` are now recognized, so they get the same controls and sensors as the rest of their families instead of a reduced fallback set. ([#8](https://github.com/jakemgold/homebridge-airmega-iocare/issues/8), [#9](https://github.com/jakemgold/homebridge-airmega-iocare/issues/9))
+- When Coway rate-limits the account, the plugin now pauses status updates for an hour. It used to keep checking every minute, which Coway says prolongs the block.
+- A command that fails (for example, while Coway is down) now logs one clear line instead of a stack trace, and Apple Home reports that the control didn't respond.
+
+### Changed
+- The plugin now identifies itself to Coway by its own name. It previously borrowed the identifier of the library behind the Home Assistant integration, which Coway uses to recognize Home Assistant traffic.
+- Coway's status page no longer reports the purifier's firmware version, so the firmware shown in Apple Home stays at its last known value.
+- The README and setup screen now explain that after changing your Coway password, you also need to update it in the plugin settings.
+
 ## [1.1.0] — 2026-07-05
 
 A reliability release. A deep review of the whole plugin turned up a batch of real bugs; this release fixes them and makes the plugin a better citizen of Coway's servers. No configuration changes are needed.
